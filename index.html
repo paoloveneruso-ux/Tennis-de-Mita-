@@ -93,7 +93,7 @@
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { getDatabase, ref, set, get, update, remove, onValue, push } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 /* ================= Firebase config ================= */
@@ -127,6 +127,7 @@ const MAX_ADVANCE_DAYS = 7;
 const OPEN_HOUR = 8;
 const CLOSE_HOUR = 22;
 const IT_DOW = ['DOM','LUN','MAR','MER','GIO','VEN','SAB'];
+const WEEKDAY_FULL = ['Domenica','Lunedì','Martedì','Mercoledì','Giovedì','Venerdì','Sabato'];
 
 function cpath(p){ return 'clubs/'+CLUB_PATH+(p?('/'+p):''); }
 function dateKey(d){ return d.toISOString().slice(0,10); }
@@ -134,6 +135,32 @@ function fmtDateDisplay(dateStr){ const [y,m,d] = dateStr.split('-'); return d+'
 function todayKey(){ return dateKey(new Date()); }
 function fmtDay(d){ return { dow: IT_DOW[d.getDay()], num: d.getDate() }; }
 function slotDateTime(dateStr, hour){ return new Date(dateStr+'T'+String(hour).padStart(2,'0')+':00:00'); }
+function yearMonth(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
+function currentYearMonth(){ return yearMonth(new Date()); }
+const IT_MONTHS = ['gennaio','febbraio','marzo','aprile','maggio','giugno','luglio','agosto','settembre','ottobre','novembre','dicembre'];
+function fmtMonth(ym){ const [y,m] = ym.split('-'); return IT_MONTHS[parseInt(m,10)-1]+' '+y; }
+function normalizePhone(phone){
+  let d = (phone||'').replace(/[^\d]/g,'');
+  if(d.startsWith('0039')) d = d.slice(2);
+  else if(d.length===10 && d.startsWith('3')) d = '39'+d;
+  return d;
+}
+function buildWhatsAppReminderUrl(phone, studentName, courseName, monthLabel, fee){
+  const digits = normalizePhone(phone);
+  const msg = `Ciao ${studentName}, ti scrivo dal ${CLUB_NAME} per ricordarti che la quota di "${courseName}" per ${monthLabel} (€ ${fee}) risulta ancora da saldare. Grazie!`;
+  return `https://wa.me/${digits}?text=${encodeURIComponent(msg)}`;
+}
+function monthsBetween(startDateStr, endDateStr){
+  const out = [];
+  const capEnd = yearMonth(new Date()) < endDateStr.slice(0,7) ? yearMonth(new Date()) : endDateStr.slice(0,7);
+  let [y,m] = startDateStr.slice(0,7).split('-').map(Number);
+  const [ey,em] = capEnd.split('-').map(Number);
+  while(y<ey || (y===ey && m<=em)){
+    out.push(y+'-'+String(m).padStart(2,'0'));
+    m++; if(m>12){m=1;y++;}
+  }
+  return out;
+}
 function toast(msg){
   const t=document.createElement('div'); t.className='toast'; t.textContent=msg;
   document.body.appendChild(t); setTimeout(()=>t.remove(),2600);
@@ -142,19 +169,32 @@ function toast(msg){
 /* ================= Stato ================= */
 const state = {
   uid: null,
+  authChecked: false,
+  authMode: 'login',
   club: null,
   admins: {},
   isAdmin: false,
+  teachers: {},
+  isTeacher: false,
   members: {},
   bookingsPublic: {},
   bookingsPrivate: {},   // popolato solo se admin
   myBookingIds: {},
   blocks: {},
+  courses: {},
+  courseEnrollments: {}, // popolato on-demand per il corso aperto
+  courseAttendance: {},  // popolato on-demand per corso+sessione aperti
+  coursePayments: {},    // { [cid]: { [eid]: { 'YYYY-MM': true|false } } }
+  myEnrollments: {},      // { [cid]: eid }
   me: null,
   selectedDate: todayKey(),
   selectedMode: 'normale',
   tab: 'campi',
   adminPeriod: 'oggi',
+  openCourseId: null,
+  attendanceCourseId: null,
+  attendanceDate: null,
+  paymentMonth: currentYearMonth(),
 };
 let privateListenerAttached = false;
 let fatalShown = false;
@@ -170,7 +210,7 @@ function showFatalError(err){
       </div>
       <div class="hint">
         Controlla questi due punti su Firebase:<br>
-        1) Authentication → Sign-in method → "Anonimo" deve essere <b>attivato</b> (non solo presente in elenco).<br>
+        1) Authentication → Sign-in method → "Email/Password" deve essere <b>attivato</b>.<br>
         2) Realtime Database → Regole: dopo aver incollato le regole, devi cliccare <b>Pubblica</b> in alto a destra, altrimenti non vengono salvate.<br><br>
         Se il messaggio dice "Permission denied", il problema è quasi certamente il punto 2.
       </div>
@@ -182,27 +222,22 @@ function showFatalError(err){
 
 /* ================= Bootstrap ================= */
 function boot(){
-  const stuckTimer = setTimeout(()=>{
-    if(!state.club) showFatalError({message:"Il caricamento sta impiegando troppo tempo (nessuna risposta dal database)."});
-  }, 8000);
-
   onAuthStateChanged(auth, async (user) => {
-    if(!user) return;
+    state.authChecked = true;
+    if(!user){
+      state.uid = null;
+      renderCurrent();
+      return;
+    }
     state.uid = user.uid;
     try{
       await ensureBootstrap();
     }catch(e){
       console.error('Bootstrap error', e);
       showFatalError(e);
-      clearTimeout(stuckTimer);
       return;
     }
     attachListeners();
-    clearTimeout(stuckTimer);
-  });
-  signInAnonymously(auth).catch(err=>{
-    clearTimeout(stuckTimer);
-    showFatalError(err);
   });
 }
 
@@ -220,6 +255,79 @@ async function ensureBootstrap(){
   }
 }
 
+/* ================= Login / Registrazione ================= */
+function renderAuthScreen(){
+  const isRegister = state.authMode === 'register';
+  root.innerHTML = `
+    <div class="court-header">
+      <div class="eyebrow">${CLUB_NAME}</div>
+      <h1>${isRegister ? 'Registrati' : 'Accedi'}</h1>
+      <div class="court-line"></div>
+    </div>
+    <div class="screen">
+      <div class="card" style="display:flex;flex-direction:column;gap:12px;">
+        ${isRegister ? `<div class="field"><label>Nome e cognome</label><input id="authName" placeholder="Nome e cognome"></div>` : ''}
+        <div class="field"><label>Email</label><input id="authEmail" type="email" placeholder="tuaemail@esempio.it"></div>
+        <div class="field"><label>Password</label><input id="authPass" type="password" placeholder="${isRegister?'Almeno 6 caratteri':'••••••••'}"></div>
+        <div id="authErr"></div>
+        <button class="btn-primary" id="authSubmit">${isRegister ? 'Crea account' : 'Accedi'}</button>
+        ${!isRegister ? `<button class="link" id="forgotBtn" style="align-self:center;">Password dimenticata?</button>` : ''}
+      </div>
+      <button class="link" id="toggleAuthMode" style="align-self:center;">${isRegister ? 'Hai già un account? Accedi' : 'Non hai un account? Registrati'}</button>
+    </div>`;
+
+  document.getElementById('toggleAuthMode').onclick = () => {
+    state.authMode = isRegister ? 'login' : 'register';
+    renderAuthScreen();
+  };
+
+  document.getElementById('authSubmit').onclick = async () => {
+    const email = document.getElementById('authEmail').value.trim();
+    const pass = document.getElementById('authPass').value;
+    const errBox = document.getElementById('authErr');
+    errBox.innerHTML = '';
+    if(!email || !pass){ errBox.innerHTML = `<div class="error-box">Inserisci email e password.</div>`; return; }
+    try{
+      if(isRegister){
+        const name = document.getElementById('authName').value.trim();
+        if(!name){ errBox.innerHTML = `<div class="error-box">Inserisci il tuo nome.</div>`; return; }
+        const cred = await createUserWithEmailAndPassword(auth, email, pass);
+        await set(ref(db, cpath('members/'+cred.user.uid)), { name, uid: cred.user.uid, createdAt: Date.now() });
+      } else {
+        await signInWithEmailAndPassword(auth, email, pass);
+      }
+    }catch(e){
+      errBox.innerHTML = `<div class="error-box">${translateAuthError(e)}</div>`;
+    }
+  };
+
+  const forgotBtn = document.getElementById('forgotBtn');
+  if(forgotBtn) forgotBtn.onclick = async () => {
+    const email = document.getElementById('authEmail').value.trim();
+    if(!email){ toast('Inserisci prima la tua email'); return; }
+    try{ await sendPasswordResetEmail(auth, email); toast('Email di recupero inviata'); }
+    catch(e){ toast(translateAuthError(e)); }
+  };
+}
+
+function translateAuthError(e){
+  const code = e && e.code || '';
+  const map = {
+    'auth/email-already-in-use': 'Questa email è già registrata. Prova ad accedere.',
+    'auth/invalid-email': 'Email non valida.',
+    'auth/weak-password': 'Password troppo corta (minimo 6 caratteri).',
+    'auth/wrong-password': 'Password errata.',
+    'auth/invalid-credential': 'Email o password errate.',
+    'auth/user-not-found': 'Nessun account con questa email.',
+    'auth/too-many-requests': 'Troppi tentativi, riprova tra poco.',
+  };
+  return map[code] || (e && e.message) || 'Errore sconosciuto.';
+}
+
+function doLogout(){
+  signOut(auth);
+}
+
 function attachListeners(){
   onValue(ref(db, cpath('info')), s=>{ state.club = s.val(); renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('admins')), s=>{
@@ -235,6 +343,57 @@ function attachListeners(){
   onValue(ref(db, cpath('bookingsPublic')), s=>{ state.bookingsPublic = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('blocks')), s=>{ state.blocks = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('myBookings/'+state.uid)), s=>{ state.myBookingIds = s.val()||{}; renderCurrent(); }, showFatalError);
+  onValue(ref(db, cpath('teachers')), s=>{ state.teachers = s.val()||{}; state.isTeacher = !!state.teachers[state.uid]; renderCurrent(); }, showFatalError);
+  onValue(ref(db, cpath('courses')), s=>{ state.courses = s.val()||{}; renderCurrent(); }, showFatalError);
+  onValue(ref(db, cpath('myEnrollments/'+state.uid)), s=>{
+    state.myEnrollments = s.val()||{};
+    Object.entries(state.myEnrollments).forEach(([cid,eid])=> loadCoursePayment(cid, eid));
+    renderCurrent();
+  }, showFatalError);
+}
+
+function loadCoursePayment(cid, eid){
+  onValue(ref(db, cpath('coursePayments/'+cid+'/'+eid)), s=>{
+    if(!state.coursePayments[cid]) state.coursePayments[cid] = {};
+    state.coursePayments[cid][eid] = s.val()||{};
+    renderCurrent();
+  }, err=>console.error('coursePayments', err));
+}
+
+function loadCoursePaymentsForCourse(cid){
+  onValue(ref(db, cpath('coursePayments/'+cid)), s=>{
+    state.coursePayments[cid] = s.val()||{};
+    renderCurrent();
+  }, err=>console.error('coursePayments', err));
+}
+
+function isTeacherOfCourse(cid){
+  const c = state.courses[cid];
+  return !!(c && state.teachers[state.uid] && c.teacherUid === state.uid);
+}
+
+function loadCourseEnrollments(cid){
+  onValue(ref(db, cpath('courseEnrollments/'+cid)), s=>{
+    state.courseEnrollments[cid] = s.val()||{};
+    renderCurrent();
+  }, err=>console.error('enrollments', err));
+}
+
+function loadCourseAttendance(cid, dateStr){
+  const key = cid+'|'+dateStr;
+  onValue(ref(db, cpath('courseAttendance/'+cid+'/'+dateStr)), s=>{
+    state.courseAttendance[key] = s.val()||{};
+    renderCurrent();
+  }, err=>console.error('attendance', err));
+}
+
+function courseCoversSlot(course, courtId, dateStr, hour){
+  if(course.courtId !== courtId) return false;
+  if(course.hour !== hour) return false;
+  const d = new Date(dateStr+'T00:00:00');
+  if(course.weekday !== d.getDay()) return false;
+  if(dateStr < course.startDate || dateStr > course.endDate) return false;
+  return true;
 }
 
 function determineMe(){
@@ -243,51 +402,36 @@ function determineMe(){
 }
 
 function renderCurrent(){
+  if(!state.authChecked){ root.innerHTML = `<div class="loading">Verifico l'accesso…</div>`; return; }
+  if(!state.uid){ renderAuthScreen(); return; }
   if(!state.club) { root.innerHTML = `<div class="loading">Carico il circolo…</div>`; return; }
-  if(!state.me){ renderPickMember(); } else { renderApp(); }
+  if(!state.me){ renderCompleteProfile(); } else { renderApp(); }
 }
 
-/* ================= Selezione / registrazione socio ================= */
-function renderPickMember(){
-  const list = Object.entries(state.members||{}).sort((a,b)=>a[1].name.localeCompare(b[1].name));
+/* ================= Completamento profilo (fallback) ================= */
+function renderCompleteProfile(){
   root.innerHTML = `
     <div class="court-header">
       <div class="eyebrow">${state.club.name}</div>
-      <h1>Chi sei?</h1>
+      <h1>Completa il profilo</h1>
       <div class="court-line"></div>
     </div>
     <div class="screen">
-      <div class="hint">Se sei già registrato ma da un nuovo dispositivo, seleziona il tuo nome per collegarlo.</div>
-      <div class="card" style="display:flex;flex-direction:column;gap:2px;">
-        ${list.length ? list.map(([id,m])=>`
-          <div class="list-row" style="cursor:pointer;" data-id="${id}">
-            <span class="name">${m.name}</span>
-            <span class="pill">Sono io</span>
-          </div>`).join('') : `<div class="hint">Nessun socio ancora registrato. Registrati qui sotto.</div>`}
-      </div>
+      <div class="hint">Non troviamo un profilo socio collegato al tuo account. Inserisci il tuo nome per completarlo.</div>
       <div class="card" style="display:flex;flex-direction:column;gap:12px;">
-        <div class="section-title">Non ti trovi in elenco?</div>
         <div class="field"><label>Il tuo nome</label><input id="myName" placeholder="Nome e cognome"></div>
-        <button class="btn-primary" id="registerBtn">Registrati come nuovo socio</button>
+        <button class="btn-primary" id="registerBtn">Salva</button>
       </div>
+      <button class="link" id="logoutLink" style="align-self:center;">Esci</button>
     </div>`;
-
-  root.querySelectorAll('.list-row').forEach(row=>{
-    row.onclick = async () => {
-      const id = row.dataset.id;
-      try{
-        await update(ref(db, cpath('members/'+id)), { uid: state.uid });
-      }catch(e){ toast('Errore: '+e.message); }
-    };
-  });
   document.getElementById('registerBtn').onclick = async () => {
     const name = document.getElementById('myName').value.trim();
     if(!name) return toast('Inserisci il tuo nome');
-    const newRef = push(ref(db, cpath('members')));
     try{
-      await set(newRef, { name, uid: state.uid, createdAt: Date.now() });
+      await set(ref(db, cpath('members/'+state.uid)), { name, uid: state.uid, createdAt: Date.now() });
     }catch(e){ toast('Errore: '+e.message); }
   };
+  document.getElementById('logoutLink').onclick = doLogout;
 }
 
 /* ================= Shell app ================= */
@@ -297,18 +441,20 @@ function renderApp(){
   root.innerHTML = `
     <div class="court-header">
       <div class="eyebrow">${state.club.name}</div>
-      <h1>${activeTab==='campi' ? 'Campi' : activeTab==='soci' ? 'Soci' : 'Amministrazione'}</h1>
+      <h1>${activeTab==='campi' ? 'Campi' : activeTab==='soci' ? 'Soci' : activeTab==='corsi' ? 'Corsi' : 'Amministrazione'}</h1>
       <div class="court-line"></div>
     </div>
     <div id="screenHost"></div>
     <div class="tabbar">
       <button data-tab="campi" class="${activeTab==='campi'?'active':''}">Campi</button>
+      <button data-tab="corsi" class="${activeTab==='corsi'?'active':''}">Corsi</button>
       <button data-tab="soci" class="${activeTab==='soci'?'active':''}">Soci</button>
       <button data-tab="admin" class="${activeTab==='admin'?'active':''}">Admin</button>
     </div>`;
   root.querySelectorAll('.tabbar button').forEach(b=>{ b.onclick = () => { state.tab = b.dataset.tab; renderApp(); }; });
   const host = document.getElementById('screenHost');
   if(activeTab==='campi') renderCourts(host);
+  else if(activeTab==='corsi') renderCorsiScreen(host);
   else if(activeTab==='soci') renderMembersScreen(host);
   else renderAdminScreen(host);
 }
@@ -355,7 +501,7 @@ function renderCourts(host){
   screen.innerHTML = `
     <div class="who-bar">
       <div class="me">Prenoti come <b>${meObj.name}</b></div>
-      <button class="link" id="notMe">non sei tu?</button>
+      <button class="link" id="notMe">esci</button>
     </div>
     <div class="today-tally">
       <div><div class="lbl">Ore giocate oggi</div></div>
@@ -407,10 +553,18 @@ function renderCourts(host){
       const blockEntry = Object.entries(state.blocks||{}).find(([_,b])=>
         b.courtId===court.id && b.date===state.selectedDate && b.hour===h
       );
+      const courseEntry = Object.entries(state.courses||{}).find(([_,c])=>
+        courseCoversSlot(c, court.id, state.selectedDate, h)
+      );
 
       if(blockEntry){
         slotEl.className = 'slot blocked';
         slotEl.innerHTML = `${label}<span class="who">chiuso</span>`;
+      } else if(courseEntry){
+        const [,c] = courseEntry;
+        slotEl.className = 'slot blocked';
+        slotEl.innerHTML = `${label}<span class="who">Corso</span>`;
+        slotEl.title = c.name;
       } else if(bookingEntry){
         const [bid, b] = bookingEntry;
         const mine = !!state.myBookingIds[bid];
@@ -441,7 +595,305 @@ function renderCourts(host){
     courtsHost.appendChild(block);
   });
 
-  screen.querySelector('#notMe').onclick = () => { state.me = null; renderPickMember(); };
+  screen.querySelector('#notMe').onclick = doLogout;
+}
+
+/* ================= Vista Corsi ================= */
+function renderCorsiScreen(host){
+  const courseList = Object.entries(state.courses||{}).sort((a,b)=> (a[1].weekday-b[1].weekday) || (a[1].hour-b[1].hour));
+  const allLinkedMembers = Object.entries(state.members||{}).filter(([_,m])=>m.uid);
+
+  const screen = document.createElement('div');
+  screen.className = 'screen';
+  screen.innerHTML = `
+    <div id="myAccountHost"></div>
+    <div id="courseCards"></div>
+    ${state.isAdmin ? `
+    <div class="card">
+      <div class="section-title">Nuovo corso</div>
+      <div class="field"><label>Nome corso</label><input id="cName" placeholder="Es. Corso principianti"></div>
+      <div class="field"><label>Maestro</label>
+        <select id="cTeacher">
+          <option value="">— nessuno assegnato —</option>
+          ${allLinkedMembers.map(([id,m])=>`<option value="${m.uid}">${m.name}${state.teachers[m.uid]?' (maestro)':''}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>Campo</label>
+        <select id="cCourt">${(state.club.courts||[]).map(c=>`<option value="${c.id}">${c.name}</option>`).join('')}</select>
+      </div>
+      <div class="field"><label>Giorno della settimana</label>
+        <select id="cWeekday">${WEEKDAY_FULL.map((w,i)=>`<option value="${i}">${w}</option>`).join('')}</select>
+      </div>
+      <div class="field"><label>Ora</label>
+        <select id="cHour">${Array.from({length:CLOSE_HOUR-OPEN_HOUR},(_,i)=>{const h=OPEN_HOUR+i;return `<option value="${h}">${String(h).padStart(2,'0')}:00</option>`;}).join('')}</select>
+      </div>
+      <div class="field"><label>Data inizio</label><input id="cStart" type="date" value="${todayKey()}"></div>
+      <div class="field"><label>Data fine</label><input id="cEnd" type="date"></div>
+      <div class="field"><label>Posti massimi</label><input id="cMax" type="number" min="1" value="8"></div>
+      <div class="field"><label>Quota mensile (€)</label><input id="cFee" type="number" min="0" step="1" value="40"></div>
+      <button class="btn-primary" id="createCourseBtn" style="width:100%;margin-top:8px;">Crea corso</button>
+    </div>` : ''}
+  `;
+  host.replaceChildren(screen);
+
+  /* ---- Il tuo conto ---- */
+  const acctHost = screen.querySelector('#myAccountHost');
+  const myEnrolledCourseIds = Object.keys(state.myEnrollments||{});
+  const upcomingHours = Object.keys(state.myBookingIds||{}).filter(bid=>{
+    const b = state.bookingsPublic[bid]; return b && slotDateTime(b.date,b.hour) >= new Date();
+  }).length;
+  let totalDue = 0;
+  const courseRows = myEnrolledCourseIds.map(cid=>{
+    const c = state.courses[cid]; if(!c) return null;
+    const eid = state.myEnrollments[cid];
+    const payMap = (state.coursePayments[cid]||{})[eid] || {};
+    const months = monthsBetween(c.startDate, c.endDate);
+    const unpaidMonths = months.filter(m => payMap[m] !== true);
+    totalDue += unpaidMonths.length * c.monthlyFee;
+    return { name:c.name, monthlyFee:c.monthlyFee, months, payMap };
+  }).filter(Boolean);
+
+  const acctCard = document.createElement('div');
+  acctCard.className = 'card';
+  acctCard.innerHTML = `
+    <div class="section-title">Il tuo conto</div>
+    <div class="list-row"><span>Ore prenotate (da oggi in poi)</span><span class="pill">${upcomingHours}h</span></div>
+    ${courseRows.map(cr=>`
+      <div style="margin-top:10px;">
+        <div class="hint" style="margin-bottom:4px;"><b style="color:var(--chalk);">${cr.name}</b> · € ${cr.monthlyFee}/mese</div>
+        ${cr.months.map(m=>`<div class="list-row"><span>${fmtMonth(m)}</span><span class="pill" style="${cr.payMap[m]===true?'':'color:var(--danger);border-color:var(--danger);'}">${cr.payMap[m]===true?'Pagato':'Da pagare'}</span></div>`).join('')}
+      </div>
+    `).join('')}
+    <div class="totale-box"><span class="l">Totale da saldare</span><span class="v" style="${totalDue>0?'color:var(--danger);':''}">€ ${totalDue.toFixed(2)}</span></div>
+  `;
+  acctHost.appendChild(acctCard);
+
+  const cardsHost = screen.querySelector('#courseCards');
+  if(!courseList.length){
+    cardsHost.innerHTML = `<div class="card"><div class="hint">Nessun corso ancora creato.</div></div>`;
+  }
+  courseList.forEach(([cid,c])=>{
+    const card = document.createElement('div');
+    card.className = 'card';
+    const isMyCourse = isTeacherOfCourse(cid);
+    card.innerHTML = `
+      <div class="section-title">${c.name}</div>
+      <div class="hint">${WEEKDAY_FULL[c.weekday]} · ${String(c.hour).padStart(2,'0')}:00 · ${(state.club.courts.find(x=>x.id===c.courtId)||{}).name||''}<br>
+      ${fmtDateDisplay(c.startDate)} → ${fmtDateDisplay(c.endDate)} · Maestro: ${c.teacherName||'—'}<br>
+      Posti: ${c.enrolledCount||0}/${c.maxSeats} · Quota: € ${c.monthlyFee}/mese</div>
+      <div class="btn-row" style="margin-top:10px;">
+        ${(state.isAdmin) ? `<button class="btn-ghost" data-act="enroll" data-cid="${cid}">Iscritti</button>` : ''}
+        ${(state.isAdmin || isMyCourse) ? `<button class="btn-clay" data-act="attendance" data-cid="${cid}">Presenze</button>` : ''}
+        ${state.isAdmin ? `<button class="small-btn" data-act="delcourse" data-cid="${cid}">Elimina</button>` : ''}
+      </div>
+      <div class="course-detail" id="detail-${cid}"></div>
+    `;
+    cardsHost.appendChild(card);
+  });
+
+  cardsHost.querySelectorAll('[data-act="enroll"]').forEach(btn=>{
+    btn.onclick = () => {
+      const cid = btn.dataset.cid;
+      state.openCourseId = (state.openCourseId===cid) ? null : cid;
+      if(state.openCourseId){ loadCourseEnrollments(cid); loadCoursePaymentsForCourse(cid); }
+      renderApp();
+    };
+  });
+  cardsHost.querySelectorAll('[data-act="attendance"]').forEach(btn=>{
+    btn.onclick = () => {
+      const cid = btn.dataset.cid;
+      const c = state.courses[cid];
+      state.attendanceCourseId = cid;
+      state.attendanceDate = state.attendanceDate && state.attendanceCourseId===cid ? state.attendanceDate : nextSessionDate(c);
+      loadCourseEnrollments(cid);
+      loadCourseAttendance(cid, state.attendanceDate);
+      renderApp();
+    };
+  });
+  cardsHost.querySelectorAll('[data-act="delcourse"]').forEach(btn=>{
+    btn.onclick = async () => {
+      const cid = btn.dataset.cid;
+      if(confirm('Eliminare il corso "'+state.courses[cid].name+'"? Iscritti e presenze registrate restano nello storico ma il corso sparirà dall\'elenco.')){
+        try{ await remove(ref(db, cpath('courses/'+cid))); }catch(e){ toast('Errore: '+e.message); }
+      }
+    };
+  });
+
+  // Pannello iscritti + pagamenti (solo admin)
+  if(state.openCourseId && state.courses[state.openCourseId]){
+    const cid = state.openCourseId;
+    const course = state.courses[cid];
+    const detailHost = screen.querySelector('#detail-'+cid);
+    const enrollments = Object.entries(state.courseEnrollments[cid]||{});
+    const paymentsForCourse = state.coursePayments[cid] || {};
+    const months = monthsBetween(course.startDate, course.endDate);
+    if(!months.includes(state.paymentMonth)) state.paymentMonth = months[months.length-1] || currentYearMonth();
+
+    const box = document.createElement('div');
+    box.style.marginTop = '12px'; box.style.borderTop='1px solid var(--line)'; box.style.paddingTop='12px';
+    box.innerHTML = `
+      <div class="section-title">Iscritti (${enrollments.length})</div>
+      <div class="field"><label>Mese pagamento</label>
+        <select id="payMonth-${cid}">${months.map(m=>`<option value="${m}" ${m===state.paymentMonth?'selected':''}>${fmtMonth(m)}</option>`).join('')}</select>
+      </div>
+      <div id="enrollList-${cid}"></div>
+      <div class="field" style="margin-top:8px;"><label>Collega a un socio esistente (opzionale)</label>
+        <select id="newEnrollMember-${cid}">
+          <option value="">— nessuno / non ha un account —</option>
+          ${allLinkedMembers.map(([id,m])=>`<option value="${m.uid}|${m.name}">${m.name}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>Nome corsista (se non collegato)</label><input id="newEnrollName-${cid}" placeholder="Nome e cognome"></div>
+      <div class="field"><label>Telefono (opzionale)</label><input id="newEnrollPhone-${cid}" placeholder="Es. 333 1234567"></div>
+      <button class="btn-ghost" id="addEnrollBtn-${cid}" style="width:100%;margin-top:6px;">Aggiungi corsista</button>
+    `;
+    detailHost.appendChild(box);
+
+    box.querySelector('#payMonth-'+cid).onchange = (e)=>{ state.paymentMonth = e.target.value; renderApp(); };
+
+    const enrollListHost = box.querySelector('#enrollList-'+cid);
+    enrollments.forEach(([eid,e])=>{
+      const row = document.createElement('div'); row.className='list-row';
+      row.innerHTML = `<span>${e.name}${e.phone?' · '+e.phone:''}${e.uid?' <span class="pill" style="padding:2px 7px;">collegato</span>':''}</span>`;
+      const paid = ((paymentsForCourse[eid]||{})[state.paymentMonth]) === true;
+      const payBtn = document.createElement('button');
+      payBtn.className = paid ? 'btn-primary' : 'small-btn';
+      payBtn.style.padding='6px 10px'; payBtn.style.fontSize='11px';
+      payBtn.textContent = paid ? 'Pagato' : 'Da pagare';
+      payBtn.onclick = async () => {
+        try{ await set(ref(db, cpath('coursePayments/'+cid+'/'+eid+'/'+state.paymentMonth)), !paid); }
+        catch(err){ toast('Errore: '+err.message); }
+      };
+      const del = document.createElement('button'); del.className='small-btn'; del.textContent='Rimuovi';
+      del.onclick = async () => {
+        try{
+          await remove(ref(db, cpath('courseEnrollments/'+cid+'/'+eid)));
+          if(e.uid) await remove(ref(db, cpath('myEnrollments/'+e.uid+'/'+cid)));
+          const newCount = Math.max(0,(state.courses[cid].enrolledCount||1)-1);
+          await update(ref(db, cpath('courses/'+cid)), { enrolledCount: newCount });
+        }catch(err){ toast('Errore: '+err.message); }
+      };
+      row.appendChild(payBtn);
+      if(!paid && e.phone){
+        const waBtn = document.createElement('button');
+        waBtn.className = 'small-btn'; waBtn.style.padding='6px 10px'; waBtn.style.fontSize='11px';
+        waBtn.textContent = 'Sollecita';
+        waBtn.onclick = () => {
+          const url = buildWhatsAppReminderUrl(e.phone, e.name, course.name, fmtMonth(state.paymentMonth), course.monthlyFee);
+          window.open(url, '_blank');
+        };
+        row.appendChild(waBtn);
+      }
+      row.appendChild(del);
+      enrollListHost.appendChild(row);
+    });
+
+    box.querySelector('#addEnrollBtn-'+cid).onclick = async () => {
+      const memberSel = box.querySelector('#newEnrollMember-'+cid).value;
+      const manualName = box.querySelector('#newEnrollName-'+cid).value.trim();
+      const phone = box.querySelector('#newEnrollPhone-'+cid).value.trim();
+      let name = manualName, linkedUid = null;
+      if(memberSel){ const [uidPart, namePart] = memberSel.split('|'); linkedUid = uidPart; name = namePart; }
+      if(!name) return toast('Inserisci il nome o collega un socio');
+      const courseNow = state.courses[cid];
+      if((courseNow.enrolledCount||0) >= courseNow.maxSeats){ toast('Corso al completo'); return; }
+      try{
+        const newRef = push(ref(db, cpath('courseEnrollments/'+cid)));
+        const eid = newRef.key;
+        await set(newRef, { name, phone, uid: linkedUid, createdAt: Date.now() });
+        if(linkedUid) await set(ref(db, cpath('myEnrollments/'+linkedUid+'/'+cid)), eid);
+        await update(ref(db, cpath('courses/'+cid)), { enrolledCount: (courseNow.enrolledCount||0)+1 });
+        toast('Corsista aggiunto');
+      }catch(err){ toast('Errore: '+err.message); }
+    };
+  }
+
+  // Pannello presenze (admin o maestro del corso)
+  if(state.attendanceCourseId && state.courses[state.attendanceCourseId]){
+    const cid = state.attendanceCourseId;
+    const c = state.courses[cid];
+    if(state.isAdmin || isTeacherOfCourse(cid)){
+      const detailHost = screen.querySelector('#detail-'+cid);
+      if(detailHost){
+        const enrollments = Object.entries(state.courseEnrollments[cid]||{});
+        const attKey = cid+'|'+state.attendanceDate;
+        const att = state.courseAttendance[attKey]||{};
+        const box = document.createElement('div');
+        box.style.marginTop = '12px'; box.style.borderTop='1px solid var(--line)'; box.style.paddingTop='12px';
+        box.innerHTML = `
+          <div class="section-title">Presenze — ${fmtDateDisplay(state.attendanceDate)}</div>
+          <div class="field"><label>Sessione</label><input id="attDate-${cid}" type="date" value="${state.attendanceDate}"></div>
+          <div id="attList-${cid}" style="margin-top:8px;"></div>
+        `;
+        detailHost.appendChild(box);
+        box.querySelector('#attDate-'+cid).onchange = (e) => {
+          state.attendanceDate = e.target.value;
+          loadCourseAttendance(cid, state.attendanceDate);
+          renderApp();
+        };
+        const attListHost = box.querySelector('#attList-'+cid);
+        if(!enrollments.length){ attListHost.innerHTML = `<div class="hint">Nessun corsista iscritto.</div>`; }
+        enrollments.forEach(([eid,e])=>{
+          const present = att[eid] === true;
+          const row = document.createElement('div'); row.className='list-row';
+          row.innerHTML = `<span>${e.name}</span>`;
+          const btn = document.createElement('button');
+          btn.className = present ? 'btn-primary' : 'small-btn';
+          btn.style.padding = '6px 12px'; btn.style.fontSize='11px';
+          btn.textContent = present ? 'Presente' : 'Assente';
+          btn.onclick = async () => {
+            try{ await set(ref(db, cpath('courseAttendance/'+cid+'/'+state.attendanceDate+'/'+eid)), !present); }
+            catch(err){ toast('Errore: '+err.message); }
+          };
+          row.appendChild(btn);
+          attListHost.appendChild(row);
+        });
+      }
+    }
+  }
+
+  if(state.isAdmin){
+    const createBtn = screen.querySelector('#createCourseBtn');
+    if(createBtn) createBtn.onclick = async () => {
+      const name = screen.querySelector('#cName').value.trim();
+      const teacherUid = screen.querySelector('#cTeacher').value;
+      const teacherName = teacherUid ? (allLinkedMembers.find(([_,m])=>m.uid===teacherUid)||[])[1]?.name : '';
+      const courtId = screen.querySelector('#cCourt').value;
+      const weekday = parseInt(screen.querySelector('#cWeekday').value,10);
+      const hour = parseInt(screen.querySelector('#cHour').value,10);
+      const startDate = screen.querySelector('#cStart').value;
+      const endDate = screen.querySelector('#cEnd').value;
+      const maxSeats = parseInt(screen.querySelector('#cMax').value,10) || 8;
+      const monthlyFee = parseFloat(screen.querySelector('#cFee').value) || 0;
+      if(!name) return toast('Inserisci il nome del corso');
+      if(!startDate || !endDate){ toast('Inserisci data inizio e fine'); return; }
+      try{
+        if(teacherUid && !state.teachers[teacherUid]){
+          await set(ref(db, cpath('teachers/'+teacherUid)), true);
+        }
+        const newRef = push(ref(db, cpath('courses')));
+        await set(newRef, {
+          name, teacherUid: teacherUid||null, teacherName: teacherName||'',
+          courtId, weekday, hour, startDate, endDate, maxSeats, monthlyFee,
+          enrolledCount: 0, createdAt: Date.now()
+        });
+        toast('Corso creato');
+      }catch(e){ toast('Errore: '+e.message); }
+    };
+  }
+}
+
+function nextSessionDate(course){
+  const now = new Date();
+  for(let i=0;i<8;i++){
+    const d = new Date(now); d.setDate(d.getDate()+i);
+    if(d.getDay()===course.weekday){
+      const k = dateKey(d);
+      if(k>=course.startDate && k<=course.endDate) return k;
+      return k; // fuori range ma ragionevole come default
+    }
+  }
+  return todayKey();
 }
 
 /* ================= Vista Soci ================= */
