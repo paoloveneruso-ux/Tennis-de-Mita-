@@ -130,6 +130,7 @@ const IT_DOW = ['DOM','LUN','MAR','MER','GIO','VEN','SAB'];
 
 function cpath(p){ return 'clubs/'+CLUB_PATH+(p?('/'+p):''); }
 function dateKey(d){ return d.toISOString().slice(0,10); }
+function fmtDateDisplay(dateStr){ const [y,m,d] = dateStr.split('-'); return d+'-'+m+'-'+y; }
 function todayKey(){ return dateKey(new Date()); }
 function fmtDay(d){ return { dow: IT_DOW[d.getDay()], num: d.getDate() }; }
 function slotDateTime(dateStr, hour){ return new Date(dateStr+'T'+String(hour).padStart(2,'0')+':00:00'); }
@@ -363,7 +364,7 @@ function renderCourts(host){
     <div class="card" style="padding:12px 14px;">
       <div class="section-title" style="margin-bottom:8px;">Modalità di prenotazione</div>
       <div class="mode-choice" id="modeChoice">
-        ${MODES.map(m=>`<button data-mode="${m.id}" class="${state.selectedMode===m.id?'sel':''}">${m.label}<br><span style="opacity:.7;">€ ${state.club.rates[m.id]}/h</span></button>`).join('')}
+        ${MODES.map(m=>`<button data-mode="${m.id}" class="${state.selectedMode===m.id?'sel':''}">${m.label}${state.isAdmin?`<br><span style="opacity:.7;">€ ${state.club.rates[m.id]}/h</span>`:''}</button>`).join('')}
       </div>
     </div>
     <div class="day-strip" id="dayStrip"></div>
@@ -515,7 +516,7 @@ function renderAdminScreen(host){
     </div>
 
     <div class="card">
-      <div class="section-title">Prenotazioni del ${state.selectedDate} (${dayBookings.length})</div>
+      <div class="section-title">Prenotazioni del ${fmtDateDisplay(state.selectedDate)} (${dayBookings.length})</div>
       <div id="bookingsHost">${dayBookings.length ? '' : '<div class="hint">Nessuna prenotazione.</div>'}</div>
     </div>
 
@@ -527,7 +528,7 @@ function renderAdminScreen(host){
       <div class="field"><label>Ora</label>
         <select id="blockHour">${Array.from({length:CLOSE_HOUR-OPEN_HOUR},(_,i)=>{const h=OPEN_HOUR+i;return `<option value="${h}">${String(h).padStart(2,'0')}:00</option>`;}).join('')}</select>
       </div>
-      <button class="btn-clay" id="blockBtn" style="width:100%;margin-top:8px;">Blocca slot per il ${state.selectedDate}</button>
+      <button class="btn-clay" id="blockBtn" style="width:100%;margin-top:8px;">Blocca slot per il ${fmtDateDisplay(state.selectedDate)}</button>
     </div>
 
     <div class="card">
