@@ -63,9 +63,13 @@
   .today-tally{display:flex;justify-content:space-between;align-items:center;background:var(--board);border:1px solid var(--line);border-radius:8px;padding:12px 14px;}
   .today-tally .num{font-family:var(--font-mono);font-size:22px;color:var(--ball);}
   .today-tally .lbl{font-size:12px;color:var(--ink-dim);}
-  .who-bar{display:flex;justify-content:space-between;align-items:center;padding:2px 2px 0;}
-  .who-bar .me{font-size:13px;color:var(--ink-dim);}
+  .who-bar{display:flex;justify-content:space-between;align-items:center;padding:2px 2px 0;gap:10px;}
+  .who-bar .me{font-size:13px;color:var(--ink-dim);display:flex;align-items:center;gap:8px;}
   .who-bar .me b{color:var(--chalk);font-weight:600;}
+  .avatar{width:34px;height:34px;border-radius:50%;object-fit:cover;background:var(--board);border:1px solid var(--line);flex-shrink:0;}
+  .avatar-initials{width:34px;height:34px;border-radius:50%;background:var(--ball-dim);color:#16220F;display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-size:14px;flex-shrink:0;}
+  .avatar-lg{width:88px;height:88px;border-radius:50%;object-fit:cover;background:var(--board);border:1px solid var(--line);}
+  .avatar-lg-initials{width:88px;height:88px;border-radius:50%;background:var(--ball-dim);color:#16220F;display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-size:32px;}
   .link{color:var(--ball);background:none;border:none;font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.05em;padding:4px 0;text-decoration:underline;cursor:pointer;}
   .member-row,.list-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--line);gap:10px;}
   .member-row:last-child,.list-row:last-child{border-bottom:none;}
@@ -164,6 +168,88 @@ function monthsBetween(startDateStr, endDateStr){
 function toast(msg){
   const t=document.createElement('div'); t.className='toast'; t.textContent=msg;
   document.body.appendChild(t); setTimeout(()=>t.remove(),2600);
+}
+
+function initials(name){
+  return (name||'?').trim().split(/\s+/).slice(0,2).map(w=>w[0]).join('').toUpperCase();
+}
+function avatarHtml(memberObj, size){
+  const cls = size>=60 ? 'avatar-lg' : 'avatar';
+  const clsInit = size>=60 ? 'avatar-lg-initials' : 'avatar-initials';
+  if(memberObj && memberObj.photoUrl){
+    return `<img class="${cls}" src="${memberObj.photoUrl}" alt="">`;
+  }
+  return `<div class="${clsInit}">${initials(memberObj && memberObj.name)}</div>`;
+}
+
+function compressImageFile(file, maxDim=220, quality=0.72){
+  return new Promise((resolve,reject)=>{
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const img = new Image();
+      img.onload = () => {
+        let w = img.width, h = img.height;
+        if(w>h){ if(w>maxDim){ h = Math.round(h*maxDim/w); w = maxDim; } }
+        else { if(h>maxDim){ w = Math.round(w*maxDim/h); h = maxDim; } }
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = () => reject(new Error('Immagine non valida'));
+      img.src = ev.target.result;
+    };
+    reader.onerror = () => reject(new Error('Lettura file fallita'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function renderProfileModal(){
+  const meObj = state.members[state.me] || {name:''};
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <h4>Il tuo profilo</h4>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:10px;" id="avatarPreviewHost"></div>
+      <input type="file" accept="image/*" id="photoInput" style="display:none;">
+      <button class="btn-ghost" id="pickPhotoBtn">Cambia foto</button>
+      <div class="field"><label>Nome e cognome</label><input id="profName" value="${meObj.name||''}"></div>
+      <div class="field"><label>Cellulare</label><input id="profPhone" type="tel" value="${meObj.phone||''}" placeholder="Es. 333 1234567"></div>
+      <div class="btn-row">
+        <button class="btn-ghost" id="closeProfile">Chiudi</button>
+        <button class="btn-primary" id="saveProfile">Salva</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  const previewHost = overlay.querySelector('#avatarPreviewHost');
+  previewHost.innerHTML = avatarHtml(meObj, 88);
+
+  overlay.querySelector('#pickPhotoBtn').onclick = () => overlay.querySelector('#photoInput').click();
+  overlay.querySelector('#photoInput').onchange = async (e) => {
+    const file = e.target.files[0];
+    if(!file) return;
+    try{
+      const dataUrl = await compressImageFile(file);
+      previewHost.innerHTML = `<img class="avatar-lg" src="${dataUrl}" alt="">`;
+      previewHost.dataset.pendingPhoto = dataUrl;
+    }catch(err){ toast('Errore immagine: '+err.message); }
+  };
+
+  overlay.querySelector('#closeProfile').onclick = () => overlay.remove();
+  overlay.querySelector('#saveProfile').onclick = async () => {
+    const name = overlay.querySelector('#profName').value.trim();
+    const phone = overlay.querySelector('#profPhone').value.trim();
+    if(!name){ toast('Il nome non può essere vuoto'); return; }
+    const updates = { name, phone: phone||null };
+    if(previewHost.dataset.pendingPhoto) updates.photoUrl = previewHost.dataset.pendingPhoto;
+    try{
+      await update(ref(db, cpath('members/'+state.me)), updates);
+      toast('Profilo aggiornato');
+      overlay.remove();
+    }catch(err){ toast('Errore: '+err.message); }
+  };
 }
 
 /* ================= Stato ================= */
@@ -268,6 +354,7 @@ function renderAuthScreen(){
     <div class="screen">
       <div class="card" style="display:flex;flex-direction:column;gap:12px;">
         ${isRegister ? `<div class="field"><label>Nome e cognome</label><input id="authName" placeholder="Nome e cognome"></div>` : ''}
+        ${isRegister ? `<div class="field"><label>Cellulare (opzionale, per solleciti WhatsApp)</label><input id="authPhone" type="tel" placeholder="Es. 333 1234567"></div>` : ''}
         <div class="field"><label>Email</label><input id="authEmail" type="email" placeholder="tuaemail@esempio.it"></div>
         <div class="field"><label>Password</label><input id="authPass" type="password" placeholder="${isRegister?'Almeno 6 caratteri':'••••••••'}"></div>
         <div id="authErr"></div>
@@ -291,9 +378,10 @@ function renderAuthScreen(){
     try{
       if(isRegister){
         const name = document.getElementById('authName').value.trim();
+        const phone = document.getElementById('authPhone').value.trim();
         if(!name){ errBox.innerHTML = `<div class="error-box">Inserisci il tuo nome.</div>`; return; }
         const cred = await createUserWithEmailAndPassword(auth, email, pass);
-        await set(ref(db, cpath('members/'+cred.user.uid)), { name, uid: cred.user.uid, createdAt: Date.now() });
+        await set(ref(db, cpath('members/'+cred.user.uid)), { name, phone: phone||null, uid: cred.user.uid, createdAt: Date.now() });
       } else {
         await signInWithEmailAndPassword(auth, email, pass);
       }
@@ -426,15 +514,17 @@ function renderCompleteProfile(){
       <div class="hint">Non troviamo un profilo socio collegato al tuo account. Inserisci il tuo nome per completarlo.</div>
       <div class="card" style="display:flex;flex-direction:column;gap:12px;">
         <div class="field"><label>Il tuo nome</label><input id="myName" placeholder="Nome e cognome"></div>
+        <div class="field"><label>Cellulare (opzionale)</label><input id="myPhone" type="tel" placeholder="Es. 333 1234567"></div>
         <button class="btn-primary" id="registerBtn">Salva</button>
       </div>
       <button class="link" id="logoutLink" style="align-self:center;">Esci</button>
     </div>`;
   document.getElementById('registerBtn').onclick = async () => {
     const name = document.getElementById('myName').value.trim();
+    const phone = document.getElementById('myPhone').value.trim();
     if(!name) return toast('Inserisci il tuo nome');
     try{
-      await set(ref(db, cpath('members/'+state.uid)), { name, uid: state.uid, createdAt: Date.now() });
+      await set(ref(db, cpath('members/'+state.uid)), { name, phone: phone||null, uid: state.uid, createdAt: Date.now() });
     }catch(e){ toast('Errore: '+e.message); }
   };
   document.getElementById('logoutLink').onclick = doLogout;
@@ -506,8 +596,11 @@ function renderCourts(host){
   screen.className = 'screen';
   screen.innerHTML = `
     <div class="who-bar">
-      <div class="me">Prenoti come <b>${meObj.name}</b></div>
-      <button class="link" id="notMe">esci</button>
+      <div class="me">${avatarHtml(meObj, 34)}Prenoti come <b>${meObj.name}</b></div>
+      <div style="display:flex;gap:12px;">
+        <button class="link" id="openProfile">profilo</button>
+        <button class="link" id="notMe">esci</button>
+      </div>
     </div>
     <div class="today-tally">
       <div><div class="lbl">Ore giocate oggi</div></div>
@@ -601,6 +694,7 @@ function renderCourts(host){
     courtsHost.appendChild(block);
   });
 
+  screen.querySelector('#openProfile').onclick = () => renderProfileModal();
   screen.querySelector('#notMe').onclick = doLogout;
 }
 
@@ -785,6 +879,11 @@ function renderCorsiScreen(host){
     detailHost.appendChild(box);
 
     box.querySelector('#payMonth-'+cid).onchange = (e)=>{ state.paymentMonth = e.target.value; renderApp(); };
+    box.querySelector('#newEnrollMember-'+cid).onchange = (e)=>{
+      const uidPart = e.target.value.split('|')[0];
+      const linkedMember = uidPart ? Object.values(state.members||{}).find(m=>m.uid===uidPart) : null;
+      box.querySelector('#newEnrollPhone-'+cid).value = (linkedMember && linkedMember.phone) || '';
+    };
 
     const enrollListHost = box.querySelector('#enrollList-'+cid);
     function paintEnrollList(filterText){
@@ -962,7 +1061,7 @@ function renderMembersScreen(host){
       const row = document.createElement('div');
       row.className = 'member-row';
       const isAdm = !!state.admins[m.uid];
-      row.innerHTML = `<span class="name">${m.name}${id===state.me?' · <span style="color:var(--ball);font-size:11px;">tu</span>':''}</span>${isAdm?'<span class="pill adminpill">Admin</span>':''}`;
+      row.innerHTML = `<span class="name" style="display:flex;align-items:center;gap:10px;">${avatarHtml(m,34)}${m.name}${id===state.me?' · <span style="color:var(--ball);font-size:11px;">tu</span>':''}</span>${isAdm?'<span class="pill adminpill">Admin</span>':''}`;
       memList.appendChild(row);
     });
   }
