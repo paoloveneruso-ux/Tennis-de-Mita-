@@ -268,6 +268,7 @@ const state = {
   myBookingIds: {},
   blocks: {},
   courses: {},
+  recurringBookings: {},
   courseEnrollments: {}, // popolato on-demand per il corso aperto
   courseAttendance: {},  // popolato on-demand per corso+sessione aperti
   coursePayments: {},    // { [cid]: { [eid]: { 'YYYY-MM': true|false } } }
@@ -275,6 +276,8 @@ const state = {
   me: null,
   selectedDate: todayKey(),
   selectedMode: 'normale',
+  bookingForTarget: '__self__',
+  bookingForGuestName: '',
   tab: 'campi',
   adminPeriod: 'oggi',
   openCourseId: null,
@@ -434,6 +437,7 @@ function attachListeners(){
   onValue(ref(db, cpath('myBookings/'+state.uid)), s=>{ state.myBookingIds = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('teachers')), s=>{ state.teachers = s.val()||{}; state.isTeacher = !!state.teachers[state.uid]; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('courses')), s=>{ state.courses = s.val()||{}; renderCurrent(); }, showFatalError);
+  onValue(ref(db, cpath('recurringBookings')), s=>{ state.recurringBookings = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('myEnrollments/'+state.uid)), s=>{
     state.myEnrollments = s.val()||{};
     Object.entries(state.myEnrollments).forEach(([cid,eid])=> loadCoursePayment(cid, eid));
@@ -556,17 +560,17 @@ function renderApp(){
 }
 
 /* ================= Prenotazioni (senza rivelare l'identità) ================= */
-async function bookSlot(court, hour, meObj){
+async function bookSlot(court, hour, targetInfo){
   const bid = push(ref(db, cpath('bookingsPublic'))).key;
   try{
     await set(ref(db, cpath('bookingsPrivate/'+bid)), {
       courtId:court.id, date:state.selectedDate, hour, mode:state.selectedMode,
-      rate: state.club.rates[state.selectedMode], memberId: state.me, memberName: meObj.name,
-      uid: state.uid, createdAt: Date.now()
+      rate: state.club.rates[state.selectedMode], memberId: targetInfo.memberId||null, memberName: targetInfo.memberName,
+      uid: targetInfo.uid||null, createdAt: Date.now()
     });
-    await set(ref(db, cpath('myBookings/'+state.uid+'/'+bid)), true);
+    if(targetInfo.uid) await set(ref(db, cpath('myBookings/'+targetInfo.uid+'/'+bid)), true);
     await set(ref(db, cpath('bookingsPublic/'+bid)), { courtId:court.id, date:state.selectedDate, hour, mode:state.selectedMode });
-    toast('Campo prenotato: '+String(hour).padStart(2,'0')+':00 · '+modeLabel(state.selectedMode));
+    toast('Campo prenotato: '+String(hour).padStart(2,'0')+':00 · '+modeLabel(state.selectedMode)+(targetInfo.uid!==state.uid?' · '+targetInfo.memberName:''));
   }catch(e){ toast('Errore nella prenotazione: '+e.message); }
 }
 
@@ -606,6 +610,16 @@ function renderCourts(host){
       <div><div class="lbl">Ore giocate oggi</div></div>
       <div class="num">${myHoursToday}h</div>
     </div>
+    ${state.isAdmin ? `
+    <div class="card" style="padding:12px 14px;">
+      <div class="section-title" style="margin-bottom:8px;">Prenoti per</div>
+      <select id="bookForSelect">
+        <option value="__self__" ${state.bookingForTarget==='__self__'?'selected':''}>Te stesso (${meObj.name})</option>
+        <option value="__guest__" ${state.bookingForTarget==='__guest__'?'selected':''}>Socio senza account / nome libero</option>
+        ${Object.entries(state.members||{}).filter(([id])=>id!==state.me).sort((a,b)=>a[1].name.localeCompare(b[1].name)).map(([id,m])=>`<option value="${id}" ${state.bookingForTarget===id?'selected':''}>${m.name}</option>`).join('')}
+      </select>
+      ${state.bookingForTarget==='__guest__' ? `<div class="field" style="margin-top:8px;"><input id="bookForGuestName" placeholder="Nome e cognome" value="${state.bookingForGuestName}"></div>` : ''}
+    </div>` : ''}
     <div class="card" style="padding:12px 14px;">
       <div class="section-title" style="margin-bottom:8px;">Modalità di prenotazione</div>
       <div class="mode-choice" id="modeChoice">
@@ -616,6 +630,12 @@ function renderCourts(host){
     <div id="courtsHost"></div>
   `;
   host.replaceChildren(screen);
+
+  if(state.isAdmin){
+    screen.querySelector('#bookForSelect').onchange = (e)=>{ state.bookingForTarget = e.target.value; renderApp(); };
+    const guestInput = screen.querySelector('#bookForGuestName');
+    if(guestInput) guestInput.oninput = (e)=>{ state.bookingForGuestName = e.target.value; };
+  }
 
   screen.querySelector('#modeChoice').querySelectorAll('button').forEach(b=>{
     b.onclick = () => { state.selectedMode = b.dataset.mode; renderApp(); };
@@ -655,6 +675,9 @@ function renderCourts(host){
       const courseEntry = Object.entries(state.courses||{}).find(([_,c])=>
         courseCoversSlot(c, court.id, state.selectedDate, h)
       );
+      const recurringEntry = Object.entries(state.recurringBookings||{}).find(([_,r])=>
+        recurringCoversSlot(r, court.id, state.selectedDate, h)
+      );
 
       if(blockEntry){
         slotEl.className = 'slot blocked';
@@ -664,6 +687,12 @@ function renderCourts(host){
         slotEl.className = 'slot blocked';
         slotEl.innerHTML = `${label}<span class="who">Corso</span>`;
         slotEl.title = c.name;
+      } else if(recurringEntry){
+        const [,r] = recurringEntry;
+        const mineFixed = r.uid === state.uid;
+        slotEl.className = 'slot ' + (mineFixed ? 'mine' : 'taken');
+        slotEl.innerHTML = `${label}<span class="who">${mineFixed?'tuo fisso':'fisso'}</span>`;
+        if(state.isAdmin) slotEl.title = r.memberName;
       } else if(bookingEntry){
         const [bid, b] = bookingEntry;
         const mine = !!state.myBookingIds[bid];
@@ -686,7 +715,12 @@ function renderCourts(host){
         slotEl.title = 'Prenotabile da '+MAX_ADVANCE_DAYS+' giorni prima';
       } else {
         slotEl.className = 'slot free'; slotEl.textContent = label;
-        slotEl.onclick = () => bookSlot(court, h, meObj);
+        slotEl.onclick = () => {
+          const target = resolveBookingTarget(meObj);
+          if(!target) return;
+          const confirmMsg = 'Confermi la prenotazione delle '+label+' su '+court.name+' ('+modeLabel(state.selectedMode)+(target.uid!==state.uid?' per '+target.memberName:'')+')?\n\nRicorda: non sarà annullabile nelle 24 ore precedenti l\'orario.';
+          if(confirm(confirmMsg)) bookSlot(court, h, target);
+        };
       }
       row.appendChild(slotEl);
     }
@@ -696,6 +730,57 @@ function renderCourts(host){
 
   screen.querySelector('#openProfile').onclick = () => renderProfileModal();
   screen.querySelector('#notMe').onclick = doLogout;
+}
+
+function resolveBookingTarget(meObj){
+  if(!state.isAdmin || state.bookingForTarget==='__self__'){
+    return { memberId: state.me, memberName: meObj.name, uid: state.uid };
+  }
+  if(state.bookingForTarget==='__guest__'){
+    const name = state.bookingForGuestName.trim();
+    if(!name){ toast('Inserisci il nome dell\'ospite'); return null; }
+    return { memberId: null, memberName: name, uid: null };
+  }
+  const m = state.members[state.bookingForTarget];
+  if(!m){ toast('Socio non trovato'); return null; }
+  return { memberId: state.bookingForTarget, memberName: m.name, uid: m.uid||null };
+}
+
+function recurringCoversSlot(r, courtId, dateStr, hour){
+  if(r.courtId!==courtId || r.weekday===undefined || r.hour!==hour) return false;
+  const dow = new Date(dateStr+'T00:00:00').getDay();
+  if(r.weekday!==dow) return false;
+  if(dateStr < r.startDate) return false;
+  if(r.endDate && dateStr > r.endDate) return false;
+  return true;
+}
+
+function recurringActiveOnDate(r, dateStr){
+  const dow = new Date(dateStr+'T00:00:00').getDay();
+  if(r.weekday!==dow) return false;
+  if(dateStr < r.startDate) return false;
+  if(r.endDate && dateStr > r.endDate) return false;
+  return true;
+}
+
+function countRecurringOccurrences(r, periodStartDate){
+  const today = new Date(); today.setHours(0,0,0,0);
+  const seriesStart = new Date(r.startDate+'T00:00:00');
+  let start = seriesStart > periodStartDate ? seriesStart : periodStartDate;
+  start.setHours(0,0,0,0);
+  let end = today;
+  if(r.endDate){ const e = new Date(r.endDate+'T00:00:00'); if(e<end) end = e; }
+  if(start>end) return 0;
+  let d = new Date(start);
+  let guard = 0;
+  while(d.getDay()!==r.weekday){
+    d.setDate(d.getDate()+1);
+    guard++;
+    if(d>end || guard>7) return 0;
+  }
+  let count = 0;
+  while(d<=end){ count++; d.setDate(d.getDate()+7); }
+  return count;
 }
 
 /* ================= Vista Corsi ================= */
@@ -1088,7 +1173,7 @@ function renderAdminScreen(host){
 
   const allPrivate = Object.entries(state.bookingsPrivate||{});
   const inPeriod = allPrivate.filter(([_,b])=> slotDateTime(b.date,b.hour) >= periodStart);
-  const totHours = inPeriod.length;
+  let totHours = inPeriod.length;
   const byMode = {}; MODES.forEach(m=> byMode[m.id] = {hours:0, revenue:0});
   let totRevenue = 0;
   inPeriod.forEach(([_,b])=>{
@@ -1098,8 +1183,19 @@ function renderAdminScreen(host){
     const r = (typeof b.rate === 'number') ? b.rate : (state.club.rates[mode]||0);
     byMode[mode].revenue += r; totRevenue += r;
   });
+  Object.values(state.recurringBookings||{}).forEach(r=>{
+    const occ = countRecurringOccurrences(r, periodStart);
+    if(occ<=0) return;
+    totHours += occ;
+    const mode = r.mode || 'normale';
+    if(!byMode[mode]) byMode[mode] = {hours:0,revenue:0};
+    byMode[mode].hours += occ;
+    const rate = (typeof r.rate === 'number') ? r.rate : (state.club.rates[mode]||0);
+    byMode[mode].revenue += occ*rate; totRevenue += occ*rate;
+  });
 
   const dayBookings = allPrivate.filter(([_,b])=>b.date===state.selectedDate).sort((a,b)=>a[1].hour-b[1].hour);
+  const dayRecurring = Object.entries(state.recurringBookings||{}).filter(([_,r])=>recurringActiveOnDate(r, state.selectedDate));
   const memberList = Object.entries(state.members||{}).sort((a,b)=>a[1].name.localeCompare(b[1].name));
 
   const screen = document.createElement('div');
@@ -1124,8 +1220,8 @@ function renderAdminScreen(host){
     </div>
 
     <div class="card">
-      <div class="section-title">Prenotazioni del ${fmtDateDisplay(state.selectedDate)} (${dayBookings.length})</div>
-      <div id="bookingsHost">${dayBookings.length ? '' : '<div class="hint">Nessuna prenotazione.</div>'}</div>
+      <div class="section-title">Prenotazioni del ${fmtDateDisplay(state.selectedDate)} (${dayBookings.length + dayRecurring.length})</div>
+      <div id="bookingsHost">${(dayBookings.length||dayRecurring.length) ? '' : '<div class="hint">Nessuna prenotazione.</div>'}</div>
     </div>
 
     <div class="card">
@@ -1137,6 +1233,34 @@ function renderAdminScreen(host){
         <select id="blockHour">${Array.from({length:CLOSE_HOUR-OPEN_HOUR},(_,i)=>{const h=OPEN_HOUR+i;return `<option value="${h}">${String(h).padStart(2,'0')}:00</option>`;}).join('')}</select>
       </div>
       <button class="btn-clay" id="blockBtn" style="width:100%;margin-top:8px;">Blocca slot per il ${fmtDateDisplay(state.selectedDate)}</button>
+    </div>
+
+    <div class="card">
+      <div class="section-title">Prenotazioni fisse (ricorrenti)</div>
+      <div class="hint" style="margin-bottom:8px;">Si ripetono ogni settimana lo stesso giorno e ora. Solo l'admin può crearle o rimuoverle — pensate per accordi presi direttamente con la segreteria.</div>
+      <div id="recurringList"></div>
+      <div class="field" style="margin-top:8px;"><label>Per chi</label>
+        <select id="recTarget">
+          <option value="__guest__">Nome libero (senza account)</option>
+          ${memberList.map(([id,m])=>`<option value="${id}">${m.name}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field" id="recGuestWrap"><label>Nome</label><input id="recGuestName" placeholder="Nome e cognome"></div>
+      <div class="field"><label>Campo</label>
+        <select id="recCourt">${(state.club.courts||[]).map(c=>`<option value="${c.id}">${c.name}</option>`).join('')}</select>
+      </div>
+      <div class="field"><label>Giorno</label>
+        <select id="recWeekday">${WEEKDAY_FULL.map((w,i)=>`<option value="${i}">${w}</option>`).join('')}</select>
+      </div>
+      <div class="field"><label>Ora</label>
+        <select id="recHour">${Array.from({length:CLOSE_HOUR-OPEN_HOUR},(_,i)=>{const h=OPEN_HOUR+i;return `<option value="${h}">${String(h).padStart(2,'0')}:00</option>`;}).join('')}</select>
+      </div>
+      <div class="field"><label>Modalità</label>
+        <select id="recMode">${MODES.map(m=>`<option value="${m.id}">${m.label} (€ ${state.club.rates[m.id]}/h)</option>`).join('')}</select>
+      </div>
+      <div class="field"><label>Data inizio</label><input id="recStart" type="date" value="${todayKey()}"></div>
+      <div class="field"><label>Data fine (opzionale)</label><input id="recEnd" type="date"></div>
+      <button class="btn-primary" id="addRecurringBtn" style="width:100%;margin-top:8px;">Crea prenotazione fissa</button>
     </div>
 
     <div class="card">
@@ -1189,6 +1313,63 @@ function renderAdminScreen(host){
     row.appendChild(del);
     bkHost.appendChild(row);
   });
+  dayRecurring.sort((a,b)=>a[1].hour-b[1].hour).forEach(([rid,r])=>{
+    const court = (state.club.courts||[]).find(c=>c.id===r.courtId);
+    const row = document.createElement('div'); row.className='list-row';
+    row.innerHTML = `<span>${String(r.hour).padStart(2,'0')}:00 · ${court?court.name:''} · ${r.memberName} · ${modeLabel(r.mode)} <span class="pill" style="padding:2px 7px;">fisso</span></span>`;
+    bkHost.appendChild(row);
+  });
+
+  const recTargetSel = screen.querySelector('#recTarget');
+  const recGuestWrap = screen.querySelector('#recGuestWrap');
+  function syncRecGuestWrap(){ recGuestWrap.style.display = recTargetSel.value==='__guest__' ? 'flex' : 'none'; }
+  syncRecGuestWrap();
+  recTargetSel.onchange = syncRecGuestWrap;
+
+  const recurringListHost = screen.querySelector('#recurringList');
+  const recurringEntries = Object.entries(state.recurringBookings||{}).sort((a,b)=>(a[1].weekday-b[1].weekday)||(a[1].hour-b[1].hour));
+  if(!recurringEntries.length){ recurringListHost.innerHTML = `<div class="hint">Nessuna prenotazione fissa attiva.</div>`; }
+  recurringEntries.forEach(([rid,r])=>{
+    const court = (state.club.courts||[]).find(c=>c.id===r.courtId);
+    const row = document.createElement('div'); row.className='list-row';
+    row.innerHTML = `<span>${WEEKDAY_FULL[r.weekday]} ${String(r.hour).padStart(2,'0')}:00 · ${court?court.name:''} · ${r.memberName} · ${modeLabel(r.mode)}${r.endDate?(' · fino al '+fmtDateDisplay(r.endDate)):''}</span>`;
+    const del = document.createElement('button'); del.className='small-btn'; del.textContent='Rimuovi';
+    del.onclick = async () => {
+      if(confirm('Rimuovere la prenotazione fissa di '+r.memberName+'?')){
+        try{ await remove(ref(db, cpath('recurringBookings/'+rid))); }catch(e){ toast('Errore: '+e.message); }
+      }
+    };
+    row.appendChild(del);
+    recurringListHost.appendChild(row);
+  });
+
+  screen.querySelector('#addRecurringBtn').onclick = async () => {
+    const targetVal = recTargetSel.value;
+    let memberId = null, memberName = '', uid = null;
+    if(targetVal==='__guest__'){
+      memberName = screen.querySelector('#recGuestName').value.trim();
+      if(!memberName){ toast('Inserisci il nome'); return; }
+    } else {
+      const m = state.members[targetVal];
+      if(!m){ toast('Socio non trovato'); return; }
+      memberId = targetVal; memberName = m.name; uid = m.uid||null;
+    }
+    const courtId = screen.querySelector('#recCourt').value;
+    const weekday = parseInt(screen.querySelector('#recWeekday').value,10);
+    const hour = parseInt(screen.querySelector('#recHour').value,10);
+    const mode = screen.querySelector('#recMode').value;
+    const startDate = screen.querySelector('#recStart').value;
+    const endDate = screen.querySelector('#recEnd').value || null;
+    if(!startDate){ toast('Inserisci la data di inizio'); return; }
+    try{
+      const newRef = push(ref(db, cpath('recurringBookings')));
+      await set(newRef, {
+        memberId, memberName, uid, courtId, weekday, hour, mode,
+        rate: state.club.rates[mode], startDate, endDate, createdAt: Date.now()
+      });
+      toast('Prenotazione fissa creata');
+    }catch(e){ toast('Errore: '+e.message); }
+  };
 
   screen.querySelector('#blockBtn').onclick = async () => {
     const courtId = screen.querySelector('#blockCourt').value;
