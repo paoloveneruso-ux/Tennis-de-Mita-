@@ -285,6 +285,9 @@ const state = {
   attendanceDate: null,
   paymentMonth: currentYearMonth(),
   draftSessions: [{ weekday: 1, hour: OPEN_HOUR, courtId: null }],
+  selectedTeacherUid: '',
+  myTeachingBookings: {},
+  maestroDate: todayKey(),
 };
 let privateListenerAttached = false;
 let fatalShown = false;
@@ -436,6 +439,7 @@ function attachListeners(){
   onValue(ref(db, cpath('blocks')), s=>{ state.blocks = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('myBookings/'+state.uid)), s=>{ state.myBookingIds = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('teachers')), s=>{ state.teachers = s.val()||{}; state.isTeacher = !!state.teachers[state.uid]; renderCurrent(); }, showFatalError);
+  onValue(ref(db, cpath('myTeachingBookings/'+state.uid)), s=>{ state.myTeachingBookings = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('courses')), s=>{ state.courses = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('recurringBookings')), s=>{ state.recurringBookings = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('myEnrollments/'+state.uid)), s=>{
@@ -541,13 +545,14 @@ function renderApp(){
   root.innerHTML = `
     <div class="court-header">
       <div class="eyebrow">${state.club.name}</div>
-      <h1>${activeTab==='campi' ? 'Campi' : activeTab==='soci' ? 'Soci' : activeTab==='corsi' ? 'Corsi' : 'Amministrazione'}</h1>
+      <h1>${activeTab==='campi' ? 'Campi' : activeTab==='soci' ? 'Soci' : activeTab==='corsi' ? 'Corsi' : activeTab==='maestro' ? 'Il tuo gestionale' : 'Amministrazione'}</h1>
       <div class="court-line"></div>
     </div>
     <div id="screenHost"></div>
     <div class="tabbar">
       <button data-tab="campi" class="${activeTab==='campi'?'active':''}">Campi</button>
       <button data-tab="corsi" class="${activeTab==='corsi'?'active':''}">Corsi</button>
+      ${state.isTeacher ? `<button data-tab="maestro" class="${activeTab==='maestro'?'active':''}">Maestro</button>` : ''}
       <button data-tab="soci" class="${activeTab==='soci'?'active':''}">Soci</button>
       <button data-tab="admin" class="${activeTab==='admin'?'active':''}">Admin</button>
     </div>`;
@@ -555,6 +560,7 @@ function renderApp(){
   const host = document.getElementById('screenHost');
   if(activeTab==='campi') renderCourts(host);
   else if(activeTab==='corsi') renderCorsiScreen(host);
+  else if(activeTab==='maestro' && state.isTeacher) renderMaestroScreen(host);
   else if(activeTab==='soci') renderMembersScreen(host);
   else renderAdminScreen(host);
 }
@@ -562,25 +568,37 @@ function renderApp(){
 /* ================= Prenotazioni (senza rivelare l'identità) ================= */
 async function bookSlot(court, hour, targetInfo){
   const bid = push(ref(db, cpath('bookingsPublic'))).key;
+  const isLezione = state.selectedMode === 'lezione';
+  const teacherUid = isLezione ? (state.selectedTeacherUid || null) : null;
+  const teacher = teacherUid ? state.members[Object.keys(state.members).find(id=>state.members[id].uid===teacherUid)] : null;
+  const teacherName = teacher ? teacher.name : '';
   try{
     await set(ref(db, cpath('bookingsPrivate/'+bid)), {
       courtId:court.id, date:state.selectedDate, hour, mode:state.selectedMode,
       rate: state.club.rates[state.selectedMode], memberId: targetInfo.memberId||null, memberName: targetInfo.memberName,
-      uid: targetInfo.uid||null, createdAt: Date.now()
+      uid: targetInfo.uid||null, teacherUid, teacherName, createdAt: Date.now()
     });
     if(targetInfo.uid) await set(ref(db, cpath('myBookings/'+targetInfo.uid+'/'+bid)), true);
-    await set(ref(db, cpath('bookingsPublic/'+bid)), { courtId:court.id, date:state.selectedDate, hour, mode:state.selectedMode });
+    await set(ref(db, cpath('bookingsPublic/'+bid)), { courtId:court.id, date:state.selectedDate, hour, mode:state.selectedMode, teacherUid, teacherName });
+    if(teacherUid){
+      await set(ref(db, cpath('myTeachingBookings/'+teacherUid+'/'+bid)), {
+        date: state.selectedDate, hour, courtId: court.id, courtName: court.name,
+        clientName: targetInfo.memberName, rate: state.club.rates[state.selectedMode], createdAt: Date.now()
+      });
+    }
     toast('Campo prenotato: '+String(hour).padStart(2,'0')+':00 · '+modeLabel(state.selectedMode)+(targetInfo.uid!==state.uid?' · '+targetInfo.memberName:''));
   }catch(e){ toast('Errore nella prenotazione: '+e.message); }
 }
 
-async function cancelBooking(bid, ownerUid){
+async function cancelBooking(bid, ownerUid, teacherUid){
   try{
     await remove(ref(db, cpath('bookingsPublic/'+bid)));
-    await Promise.all([
+    const cleanups = [
       remove(ref(db, cpath('bookingsPrivate/'+bid))),
       remove(ref(db, cpath('myBookings/'+ownerUid+'/'+bid)))
-    ]);
+    ];
+    if(teacherUid) cleanups.push(remove(ref(db, cpath('myTeachingBookings/'+teacherUid+'/'+bid))));
+    await Promise.all(cleanups);
     toast('Prenotazione annullata');
   }catch(e){ toast('Errore: '+e.message); }
 }
@@ -625,6 +643,13 @@ function renderCourts(host){
       <div class="mode-choice" id="modeChoice">
         ${MODES.map(m=>`<button data-mode="${m.id}" class="${state.selectedMode===m.id?'sel':''}">${m.label}${state.isAdmin?`<br><span style="opacity:.7;">€ ${state.club.rates[m.id]}/h</span>`:''}</button>`).join('')}
       </div>
+      ${state.selectedMode==='lezione' ? `
+      <div class="field" style="margin-top:10px;"><label>Maestro</label>
+        <select id="teacherSelect">
+          <option value="">— seleziona il maestro —</option>
+          ${Object.entries(state.members||{}).filter(([_,m])=>m.uid && state.teachers[m.uid]).sort((a,b)=>a[1].name.localeCompare(b[1].name)).map(([id,m])=>`<option value="${m.uid}" ${state.selectedTeacherUid===m.uid?'selected':''}>${m.name}</option>`).join('')}
+        </select>
+      </div>` : ''}
     </div>
     <div class="day-strip" id="dayStrip"></div>
     <div id="courtsHost"></div>
@@ -640,6 +665,8 @@ function renderCourts(host){
   screen.querySelector('#modeChoice').querySelectorAll('button').forEach(b=>{
     b.onclick = () => { state.selectedMode = b.dataset.mode; renderApp(); };
   });
+  const teacherSelect = screen.querySelector('#teacherSelect');
+  if(teacherSelect) teacherSelect.onchange = (e)=>{ state.selectedTeacherUid = e.target.value; };
 
   const strip = screen.querySelector('#dayStrip');
   days.forEach(d=>{
@@ -697,7 +724,7 @@ function renderCourts(host){
         const [bid, b] = bookingEntry;
         const mine = !!state.myBookingIds[bid];
         slotEl.className = 'slot ' + (mine ? 'mine' : 'taken') + (isPast?' past':'');
-        const modeTag = `<span class="mode-tag">${b.mode||''}</span>`;
+        const modeTag = `<span class="mode-tag">${b.mode||''}${b.mode==='lezione'&&b.teacherName?' · '+b.teacherName:''}</span>`;
         slotEl.innerHTML = `${label}<span class="who">${mine?'tu':'occupato'}</span>${modeTag}`;
         if(mine && !isPast){
           const hoursUntil = (thisSlotTime - now)/3600000;
@@ -705,7 +732,7 @@ function renderCourts(host){
           slotEl.style.cursor = canCancel ? 'pointer' : 'default';
           slotEl.onclick = () => {
             if(!canCancel){ toast("Non annullabile: mancano meno di 24h all'orario prenotato"); return; }
-            if(confirm('Annullare la prenotazione delle '+label+'?')) cancelBooking(bid, state.uid);
+            if(confirm('Annullare la prenotazione delle '+label+'?')) cancelBooking(bid, state.uid, b.teacherUid);
           };
         }
       } else if(isPast){
@@ -718,7 +745,13 @@ function renderCourts(host){
         slotEl.onclick = () => {
           const target = resolveBookingTarget(meObj);
           if(!target) return;
-          const confirmMsg = 'Confermi la prenotazione delle '+label+' su '+court.name+' ('+modeLabel(state.selectedMode)+(target.uid!==state.uid?' per '+target.memberName:'')+')?\n\nRicorda: non sarà annullabile nelle 24 ore precedenti l\'orario.';
+          const teacherList = Object.entries(state.members||{}).filter(([_,m])=>m.uid && state.teachers[m.uid]);
+          if(state.selectedMode==='lezione' && teacherList.length && !state.selectedTeacherUid){
+            toast('Seleziona il maestro per la lezione');
+            return;
+          }
+          const teacherName = state.selectedMode==='lezione' && state.selectedTeacherUid ? (teacherList.find(([_,m])=>m.uid===state.selectedTeacherUid)||[])[1]?.name : null;
+          const confirmMsg = 'Confermi la prenotazione delle '+label+' su '+court.name+' ('+modeLabel(state.selectedMode)+(teacherName?' con '+teacherName:'')+(target.uid!==state.uid?' per '+target.memberName:'')+')?\n\nRicorda: non sarà annullabile nelle 24 ore precedenti l\'orario.';
           if(confirm(confirmMsg)) bookSlot(court, h, target);
         };
       }
@@ -1124,6 +1157,65 @@ function nextSessionDate(course){
   return todayKey();
 }
 
+/* ================= Vista Maestro ================= */
+function renderMaestroScreen(host){
+  const myCourseSessionsToday = Object.entries(state.courses||{})
+    .filter(([_,c])=> c.teacherUid===state.uid && getCourseSessions(c).some(s=>{
+      const dow = new Date(state.maestroDate+'T00:00:00').getDay();
+      return s.weekday===dow && state.maestroDate>=c.startDate && state.maestroDate<=c.endDate;
+    }));
+
+  const lessonsToday = Object.entries(state.myTeachingBookings||{})
+    .filter(([_,l])=>l.date===state.maestroDate)
+    .sort((a,b)=>a[1].hour-b[1].hour);
+
+  const totHours = lessonsToday.length;
+  const totRevenue = lessonsToday.reduce((sum,[_,l])=>sum+(typeof l.rate==='number'?l.rate:0), 0);
+
+  const screen = document.createElement('div');
+  screen.className = 'screen';
+  screen.innerHTML = `
+    <div class="card">
+      <div class="section-title">Le tue lezioni e corsi</div>
+      <div class="field"><label>Giorno</label><input id="maestroDateInput" type="date" value="${state.maestroDate}"></div>
+    </div>
+
+    <div class="card">
+      <div class="section-title">Lezioni individuali — ${fmtDateDisplay(state.maestroDate)}</div>
+      <div id="lessonList">${lessonsToday.length ? '' : '<div class="hint">Nessuna lezione individuale in questo giorno.</div>'}</div>
+      <div class="totale-box"><span class="l">Ore</span><span class="v">${totHours}h</span></div>
+      <div class="totale-box"><span class="l">Incasso lezioni</span><span class="v">€ ${totRevenue.toFixed(2)}</span></div>
+    </div>
+
+    <div class="card">
+      <div class="section-title">Corsi che tieni oggi</div>
+      <div id="courseSessList">${myCourseSessionsToday.length ? '' : '<div class="hint">Nessun corso previsto in questo giorno.</div>'}</div>
+      <div class="hint" style="margin-top:6px;">Le quote dei corsi sono mensili e vengono gestite dall'admin nella tab Corsi — qui vedi solo l'orario.</div>
+    </div>
+  `;
+  host.replaceChildren(screen);
+
+  const lessonList = screen.querySelector('#lessonList');
+  lessonsToday.forEach(([bid,l])=>{
+    const row = document.createElement('div'); row.className='list-row';
+    row.innerHTML = `<span>${String(l.hour).padStart(2,'0')}:00 · ${l.courtName||''} · ${l.clientName}</span><span class="pill">€ ${(l.rate||0).toFixed(2)}</span>`;
+    lessonList.appendChild(row);
+  });
+
+  const courseSessList = screen.querySelector('#courseSessList');
+  myCourseSessionsToday.forEach(([cid,c])=>{
+    const sessionsToday = getCourseSessions(c).filter(s=>s.weekday===new Date(state.maestroDate+'T00:00:00').getDay());
+    sessionsToday.forEach(s=>{
+      const court = (state.club.courts||[]).find(x=>x.id===s.courtId);
+      const row = document.createElement('div'); row.className='list-row';
+      row.innerHTML = `<span>${String(s.hour).padStart(2,'0')}:00 · ${court?court.name:''} · ${c.name}</span><span class="pill">${c.enrolledCount||0} iscritti</span>`;
+      courseSessList.appendChild(row);
+    });
+  });
+
+  screen.querySelector('#maestroDateInput').onchange = (e)=>{ state.maestroDate = e.target.value; renderApp(); };
+}
+
 /* ================= Vista Soci ================= */
 function renderMembersScreen(host){
   const list = Object.entries(state.members||{}).sort((a,b)=>a[1].name.localeCompare(b[1].name));
@@ -1195,6 +1287,13 @@ function renderAdminScreen(host){
   });
 
   const dayBookings = allPrivate.filter(([_,b])=>b.date===state.selectedDate).sort((a,b)=>a[1].hour-b[1].hour);
+  const byTeacherToday = {};
+  dayBookings.forEach(([_,b])=>{
+    if(b.mode!=='lezione' || !b.teacherName) return;
+    if(!byTeacherToday[b.teacherName]) byTeacherToday[b.teacherName] = {hours:0, revenue:0};
+    byTeacherToday[b.teacherName].hours += 1;
+    byTeacherToday[b.teacherName].revenue += (typeof b.rate==='number'?b.rate:(state.club.rates.lezione||0));
+  });
   const dayRecurring = Object.entries(state.recurringBookings||{}).filter(([_,r])=>recurringActiveOnDate(r, state.selectedDate));
   const memberList = Object.entries(state.members||{}).sort((a,b)=>a[1].name.localeCompare(b[1].name));
 
@@ -1221,6 +1320,7 @@ function renderAdminScreen(host){
 
     <div class="card">
       <div class="section-title">Prenotazioni del ${fmtDateDisplay(state.selectedDate)} (${dayBookings.length + dayRecurring.length})</div>
+      ${Object.keys(byTeacherToday).length ? `<div class="hint" style="margin-bottom:6px;">Incasso lezioni per maestro:</div>${Object.entries(byTeacherToday).map(([name,d])=>`<div class="list-row"><span>${name}</span><span class="pill">${d.hours}h · € ${d.revenue.toFixed(2)}</span></div>`).join('')}` : ''}
       <div id="bookingsHost">${(dayBookings.length||dayRecurring.length) ? '' : '<div class="hint">Nessuna prenotazione.</div>'}</div>
     </div>
 
@@ -1307,9 +1407,9 @@ function renderAdminScreen(host){
   dayBookings.forEach(([bid,b])=>{
     const court = (state.club.courts||[]).find(c=>c.id===b.courtId);
     const row = document.createElement('div'); row.className='list-row';
-    row.innerHTML = `<span>${String(b.hour).padStart(2,'0')}:00 · ${court?court.name:''} · ${b.memberName} · ${modeLabel(b.mode)}</span>`;
+    row.innerHTML = `<span>${String(b.hour).padStart(2,'0')}:00 · ${court?court.name:''} · ${b.memberName} · ${modeLabel(b.mode)}${b.teacherName?' · maestro: '+b.teacherName:''}</span>`;
     const del = document.createElement('button'); del.className='small-btn'; del.textContent='Annulla';
-    del.onclick = () => cancelBooking(bid, b.uid);
+    del.onclick = () => cancelBooking(bid, b.uid, b.teacherUid);
     row.appendChild(del);
     bkHost.appendChild(row);
   });
