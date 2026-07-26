@@ -154,6 +154,20 @@ function buildWhatsAppReminderUrl(phone, studentName, courseName, monthLabel, fe
   const msg = `Ciao ${studentName}, ti scrivo dal ${CLUB_NAME} per ricordarti che la quota di "${courseName}" per ${monthLabel} (€ ${fee}) risulta ancora da saldare. Grazie!`;
   return `https://wa.me/${digits}?text=${encodeURIComponent(msg)}`;
 }
+
+function offerWhatsAppFreedSlot(dateStr, hour, courtName){
+  const template = (state.club && state.club.whatsappTemplate) || 'Si è liberato un campo: {giorno} {data} alle {ora} su {campo}. Chi fosse interessato può prenotarlo sull\'app!';
+  const giorno = WEEKDAY_FULL[new Date(dateStr+'T00:00:00').getDay()];
+  const msg = template
+    .replace(/{giorno}/g, giorno)
+    .replace(/{data}/g, fmtDateDisplay(dateStr))
+    .replace(/{ora}/g, String(hour).padStart(2,'0')+':00')
+    .replace(/{campo}/g, courtName);
+  const groupHint = (state.club && state.club.whatsappGroupName) ? ' al gruppo "'+state.club.whatsappGroupName+'"' : '';
+  if(confirm('Vuoi inviare un messaggio WhatsApp'+groupHint+' per informare i soci?\n\n"'+msg+'"')){
+    window.open('https://wa.me/?text='+encodeURIComponent(msg), '_blank');
+  }
+}
 function monthsBetween(startDateStr, endDateStr){
   const out = [];
   const capEnd = yearMonth(new Date()) < endDateStr.slice(0,7) ? yearMonth(new Date()) : endDateStr.slice(0,7);
@@ -1375,6 +1389,23 @@ function renderAdminScreen(host){
       <div class="hint" style="margin-bottom:8px;">Chi diventa admin può gestire tariffe, soci, blocchi e cancellare qualunque prenotazione.</div>
       <div id="adminList"></div>
     </div>
+
+    <div class="card">
+      <div class="section-title">Maestri</div>
+      <div class="hint" style="margin-bottom:8px;">Chi diventa maestro vede la tab "Maestro" con le proprie lezioni e i corsi che tiene.</div>
+      <div id="teacherList"></div>
+    </div>
+
+    <div class="card">
+      <div class="section-title">Notifica WhatsApp per ore liberate</div>
+      <div class="hint" style="margin-bottom:8px;">Quando annulli una prenotazione dall'elenco qui sopra, potrai inviare un messaggio pronto al tuo gruppo WhatsApp con i dettagli dell'ora liberata.</div>
+      <div class="field"><label>Nome gruppo WhatsApp (promemoria, WhatsApp non permette di sceglierlo dall'app)</label><input id="waGroupName" value="${state.club.whatsappGroupName||''}" placeholder="Es. Soci TC Lello de Mita"></div>
+      <div class="field"><label>Messaggio predefinito</label>
+        <textarea id="waTemplate" rows="4" style="width:100%;background:var(--board);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:10px;font-family:var(--font-body);font-size:14px;">${state.club.whatsappTemplate||"Si è liberato un campo: {giorno} {data} alle {ora} su {campo}. Chi fosse interessato può prenotarlo sull'app!"}</textarea>
+      </div>
+      <div class="hint">Segnaposto disponibili: {giorno} {data} {ora} {campo}</div>
+      <button class="btn-ghost" id="saveWaBtn" style="width:100%;margin-top:8px;">Salva messaggio</button>
+    </div>
   `;
   host.replaceChildren(screen);
 
@@ -1409,7 +1440,10 @@ function renderAdminScreen(host){
     const row = document.createElement('div'); row.className='list-row';
     row.innerHTML = `<span>${String(b.hour).padStart(2,'0')}:00 · ${court?court.name:''} · ${b.memberName} · ${modeLabel(b.mode)}${b.teacherName?' · maestro: '+b.teacherName:''}</span>`;
     const del = document.createElement('button'); del.className='small-btn'; del.textContent='Annulla';
-    del.onclick = () => cancelBooking(bid, b.uid, b.teacherUid);
+    del.onclick = async () => {
+      await cancelBooking(bid, b.uid, b.teacherUid);
+      offerWhatsAppFreedSlot(b.date, b.hour, court ? court.name : '');
+    };
     row.appendChild(del);
     bkHost.appendChild(row);
   });
@@ -1528,6 +1562,34 @@ function renderAdminScreen(host){
     row.appendChild(btn);
     adminListHost.appendChild(row);
   });
+
+  const teacherListHost = screen.querySelector('#teacherList');
+  memberList.filter(([_,m])=>m.uid).forEach(([id,m])=>{
+    const uid = m.uid;
+    const isTeach = !!state.teachers[uid];
+    const row = document.createElement('div'); row.className='member-row';
+    row.innerHTML = `<span class="name">${m.name}</span>${isTeach?'<span class="pill" style="border-color:var(--clay-dim);color:var(--clay);">Maestro</span>':''}`;
+    const btn = document.createElement('button');
+    btn.className = 'small-btn';
+    btn.textContent = isTeach ? 'Rimuovi maestro' : 'Rendi maestro';
+    btn.onclick = async () => {
+      try{
+        if(isTeach) await remove(ref(db, cpath('teachers/'+uid)));
+        else await set(ref(db, cpath('teachers/'+uid)), true);
+      }catch(e){ toast('Errore: '+e.message); }
+    };
+    row.appendChild(btn);
+    teacherListHost.appendChild(row);
+  });
+
+  screen.querySelector('#saveWaBtn').onclick = async () => {
+    const template = screen.querySelector('#waTemplate').value.trim();
+    const groupName = screen.querySelector('#waGroupName').value.trim();
+    try{
+      await update(ref(db, cpath('info')), { whatsappTemplate: template, whatsappGroupName: groupName });
+      toast('Messaggio salvato');
+    }catch(e){ toast('Errore: '+e.message); }
+  };
 }
 
 boot();
