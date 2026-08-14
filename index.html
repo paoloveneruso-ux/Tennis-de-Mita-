@@ -297,6 +297,8 @@ const state = {
   recurringBookings: {},
   courseEnrollments: {}, // popolato on-demand per il corso aperto
   courseAttendance: {},  // popolato on-demand per corso+sessione aperti
+  courseAttendanceByCourse: {}, // { [cid]: { [date]: { [eid]: true|false } } } storico completo per le assenze
+  absencesCourseId: null,
   coursePayments: {},    // { [cid]: { [eid]: { 'YYYY-MM': true|false } } }
   myEnrollments: {},      // { [cid]: eid }
   me: null,
@@ -502,12 +504,30 @@ function loadCourseEnrollments(cid){
   }, err=>console.error('enrollments', err));
 }
 
+const attendanceListenersLoaded = new Set();
 function loadCourseAttendance(cid, dateStr){
   const key = cid+'|'+dateStr;
+  if(attendanceListenersLoaded.has(key)) return;
+  attendanceListenersLoaded.add(key);
   onValue(ref(db, cpath('courseAttendance/'+cid+'/'+dateStr)), s=>{
     state.courseAttendance[key] = s.val()||{};
     renderCurrent();
   }, err=>console.error('attendance', err));
+}
+
+function loadCourseAttendanceAll(cid){
+  if(attendanceListenersLoaded.has('all|'+cid)) return;
+  attendanceListenersLoaded.add('all|'+cid);
+  onValue(ref(db, cpath('courseAttendance/'+cid)), s=>{
+    state.courseAttendanceByCourse[cid] = s.val()||{};
+    renderCurrent();
+  }, err=>console.error('attendance-all', err));
+}
+
+function isSessionOnDate(course, dateStr){
+  if(dateStr < course.startDate || dateStr > course.endDate) return false;
+  const dow = new Date(dateStr+'T00:00:00').getDay();
+  return getCourseSessions(course).some(s=>s.weekday===dow);
 }
 
 function getCourseSessions(course){
@@ -901,6 +921,13 @@ function renderCorsiScreen(host){
     <div class="card">
       <div class="section-title">Nuovo corso</div>
       <div class="field"><label>Nome corso</label><input id="cName" placeholder="Es. Corso principianti"></div>
+      <div class="field"><label>Livello</label>
+        <select id="cLevel">
+          <option value="Base">Base</option>
+          <option value="Intermedio">Intermedio</option>
+          <option value="Avanzato">Avanzato</option>
+        </select>
+      </div>
       <div class="field"><label>Maestro</label>
         <select id="cTeacher">
           <option value="">— nessuno assegnato —</option>
@@ -989,14 +1016,26 @@ function renderCorsiScreen(host){
     const card = document.createElement('div');
     card.className = 'card';
     const isMyCourse = isTeacherOfCourse(cid);
+    const myEid = state.myEnrollments ? state.myEnrollments[cid] : null;
+    const isEnrolledToday = myEid && isSessionOnDate(c, todayKey());
+    if(isEnrolledToday) loadCourseAttendance(cid, todayKey());
+    const myTodayStatus = isEnrolledToday ? ((state.courseAttendance[cid+'|'+todayKey()]||{})[myEid]) : undefined;
+
     card.innerHTML = `
-      <div class="section-title">${c.name}</div>
+      <div class="section-title">${c.name} ${c.livello?`<span class="pill" style="padding:2px 8px;">${c.livello}</span>`:''}</div>
       <div class="hint">${getCourseSessions(c).map(s=>`${WEEKDAY_FULL[s.weekday]} · ${String(s.hour).padStart(2,'0')}:00 · ${(state.club.courts.find(x=>x.id===s.courtId)||{}).name||''}`).join('<br>')}<br>
       ${fmtDateDisplay(c.startDate)} → ${fmtDateDisplay(c.endDate)} · Maestro: ${c.teacherName||'—'}<br>
       Posti: ${c.enrolledCount||0}/${c.maxSeats} · Quota: € ${c.monthlyFee}/mese</div>
+      ${isEnrolledToday ? `
+      <div style="margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:8px;">
+        ${myTodayStatus===true
+          ? `<div class="hint" style="color:var(--ball);">✓ Presenza di oggi confermata</div>`
+          : `<button class="btn-primary" data-act="selfcheckin" data-cid="${cid}" style="width:100%;">Conferma la tua presenza di oggi</button>`}
+      </div>` : ''}
       <div class="btn-row" style="margin-top:10px;">
         ${(state.isAdmin) ? `<button class="btn-ghost" data-act="enroll" data-cid="${cid}">Iscritti</button>` : ''}
         ${(state.isAdmin || isMyCourse) ? `<button class="btn-clay" data-act="attendance" data-cid="${cid}">Presenze</button>` : ''}
+        ${(state.isAdmin || isMyCourse) ? `<button class="btn-ghost" data-act="absences" data-cid="${cid}">Assenze</button>` : ''}
         ${state.isAdmin ? `<button class="small-btn" data-act="delcourse" data-cid="${cid}">Elimina</button>` : ''}
       </div>
       <div class="course-detail" id="detail-${cid}"></div>
@@ -1004,6 +1043,24 @@ function renderCorsiScreen(host){
     cardsHost.appendChild(card);
   });
 
+  cardsHost.querySelectorAll('[data-act="selfcheckin"]').forEach(btn=>{
+    btn.onclick = async () => {
+      const cid = btn.dataset.cid;
+      const eid = state.myEnrollments[cid];
+      try{
+        await set(ref(db, cpath('courseAttendance/'+cid+'/'+todayKey()+'/'+eid)), true);
+        toast('Presenza confermata, grazie!');
+      }catch(e){ toast('Errore: '+e.message); }
+    };
+  });
+  cardsHost.querySelectorAll('[data-act="absences"]').forEach(btn=>{
+    btn.onclick = () => {
+      const cid = btn.dataset.cid;
+      state.absencesCourseId = (state.absencesCourseId===cid) ? null : cid;
+      if(state.absencesCourseId){ loadCourseEnrollments(cid); loadCourseAttendanceAll(cid); }
+      renderApp();
+    };
+  });
   cardsHost.querySelectorAll('[data-act="enroll"]').forEach(btn=>{
     btn.onclick = () => {
       const cid = btn.dataset.cid;
@@ -1179,10 +1236,59 @@ function renderCorsiScreen(host){
     }
   }
 
+  // Pannello assenze e inviti al recupero (admin o maestro del corso)
+  if(state.absencesCourseId && state.courses[state.absencesCourseId]){
+    const cid = state.absencesCourseId;
+    const course = state.courses[cid];
+    if(state.isAdmin || isTeacherOfCourse(cid)){
+      const detailHost = screen.querySelector('#detail-'+cid);
+      if(detailHost){
+        const enrollments = Object.entries(state.courseEnrollments[cid]||{});
+        const history = state.courseAttendanceByCourse[cid] || {};
+        const stats = enrollments.map(([eid,e])=>{
+          let absences = 0, presences = 0;
+          Object.values(history).forEach(dayMap=>{
+            if(dayMap[eid]===false) absences++;
+            else if(dayMap[eid]===true) presences++;
+          });
+          return { eid, e, absences, presences };
+        }).sort((a,b)=>b.absences-a.absences);
+
+        const box = document.createElement('div');
+        box.style.marginTop = '12px'; box.style.borderTop='1px solid var(--line)'; box.style.paddingTop='12px';
+        box.innerHTML = `
+          <div class="section-title">Assenze — ${course.name} (${course.livello||''})</div>
+          <div class="hint" style="margin-bottom:8px;">Ordinati per numero di assenze registrate.</div>
+          <div id="absenceList-${cid}"></div>
+        `;
+        detailHost.appendChild(box);
+        const listHost = box.querySelector('#absenceList-'+cid);
+        if(!stats.length){ listHost.innerHTML = `<div class="hint">Nessun dato di presenza ancora registrato.</div>`; }
+        stats.forEach(st=>{
+          const row = document.createElement('div'); row.className='list-row';
+          row.innerHTML = `<span>${st.e.name}</span><span class="pill" style="${st.absences>0?'color:var(--danger);border-color:var(--danger);':''}">${st.absences} assenze · ${st.presences} presenze</span>`;
+          if(st.absences>0 && st.e.phone){
+            const waBtn = document.createElement('button');
+            waBtn.className='small-btn'; waBtn.style.padding='6px 10px'; waBtn.style.fontSize='11px';
+            waBtn.textContent = 'Invita al recupero';
+            waBtn.onclick = () => {
+              const digits = normalizePhone(st.e.phone);
+              const msg = `Ciao ${st.e.name}, dal ${CLUB_NAME}: abbiamo notato ${st.absences} assenze nel corso "${course.name}" (livello ${course.livello||'-'}). Ti va di recuperare una lezione? Facci sapere quando sei disponibile!`;
+              window.open(`https://wa.me/${digits}?text=${encodeURIComponent(msg)}`, '_blank');
+            };
+            row.appendChild(waBtn);
+          }
+          listHost.appendChild(row);
+        });
+      }
+    }
+  }
+
   if(state.isAdmin){
     const createBtn = screen.querySelector('#createCourseBtn');
     if(createBtn) createBtn.onclick = async () => {
       const name = screen.querySelector('#cName').value.trim();
+      const livello = screen.querySelector('#cLevel').value;
       const teacherUid = screen.querySelector('#cTeacher').value;
       const teacherName = teacherUid ? (allLinkedMembers.find(([_,m])=>m.uid===teacherUid)||[])[1]?.name : '';
       const startDate = screen.querySelector('#cStart').value;
@@ -1199,7 +1305,7 @@ function renderCorsiScreen(host){
         }
         const newRef = push(ref(db, cpath('courses')));
         await set(newRef, {
-          name, teacherUid: teacherUid||null, teacherName: teacherName||'',
+          name, livello, teacherUid: teacherUid||null, teacherName: teacherName||'',
           sessions, startDate, endDate, maxSeats, monthlyFee,
           enrolledCount: 0, createdAt: Date.now()
         });
