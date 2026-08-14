@@ -923,9 +923,11 @@ function renderCorsiScreen(host){
       <div class="field"><label>Nome corso</label><input id="cName" placeholder="Es. Corso principianti"></div>
       <div class="field"><label>Livello</label>
         <select id="cLevel">
+          <option value="Principianti">Principianti</option>
           <option value="Base">Base</option>
           <option value="Intermedio">Intermedio</option>
           <option value="Avanzato">Avanzato</option>
+          <option value="Agonisti">Agonisti</option>
         </select>
       </div>
       <div class="field"><label>Maestro</label>
@@ -1022,7 +1024,7 @@ function renderCorsiScreen(host){
     const myTodayStatus = isEnrolledToday ? ((state.courseAttendance[cid+'|'+todayKey()]||{})[myEid]) : undefined;
 
     card.innerHTML = `
-      <div class="section-title">${c.name} ${c.livello?`<span class="pill" style="padding:2px 8px;">${c.livello}</span>`:''}</div>
+      <div class="section-title">${c.name} ${(c.livello && (state.isAdmin||isMyCourse))?`<span class="pill" style="padding:2px 8px;">${c.livello}</span>`:''}</div>
       <div class="hint">${getCourseSessions(c).map(s=>`${WEEKDAY_FULL[s.weekday]} · ${String(s.hour).padStart(2,'0')}:00 · ${(state.club.courts.find(x=>x.id===s.courtId)||{}).name||''}`).join('<br>')}<br>
       ${fmtDateDisplay(c.startDate)} → ${fmtDateDisplay(c.endDate)} · Maestro: ${c.teacherName||'—'}<br>
       Posti: ${c.enrolledCount||0}/${c.maxSeats} · Quota: € ${c.monthlyFee}/mese</div>
@@ -1451,6 +1453,30 @@ function renderAdminScreen(host){
   }
 
   const now = new Date();
+
+  // Carica dati di tutti i corsi per individuare i recuperi da suggerire
+  Object.keys(state.courses||{}).forEach(cid=>{
+    loadCourseEnrollments(cid);
+    loadCourseAttendanceAll(cid);
+  });
+  const absenceThreshold = (state.club && state.club.absenceThreshold) || 2;
+  const recuperiSuggeriti = [];
+  Object.entries(state.courses||{}).forEach(([cid,c])=>{
+    const enrollments = Object.entries(state.courseEnrollments[cid]||{});
+    const history = state.courseAttendanceByCourse[cid] || {};
+    enrollments.forEach(([eid,e])=>{
+      let absences = 0;
+      Object.values(history).forEach(dayMap=>{ if(dayMap[eid]===false) absences++; });
+      if(absences >= absenceThreshold){
+        const alt = Object.entries(state.courses||{}).find(([cid2,c2])=>
+          cid2!==cid && c2.livello===c.livello && (c2.enrolledCount||0) < c2.maxSeats
+        );
+        recuperiSuggeriti.push({ cid, course: c, eid, student: e, absences, alt: alt ? alt[1] : null });
+      }
+    });
+  });
+  recuperiSuggeriti.sort((a,b)=>b.absences-a.absences);
+
   const periodStart = {
     oggi: new Date(now.getFullYear(),now.getMonth(),now.getDate()),
     settimana: new Date(now.getTime()-7*24*3600*1000),
@@ -1580,14 +1606,42 @@ function renderAdminScreen(host){
       <div class="section-title">Notifica WhatsApp per ore liberate</div>
       <div class="hint" style="margin-bottom:8px;">Quando annulli una prenotazione dall'elenco qui sopra, potrai inviare un messaggio pronto al tuo gruppo WhatsApp con i dettagli dell'ora liberata.</div>
       <div class="field"><label>Nome gruppo WhatsApp (promemoria, WhatsApp non permette di sceglierlo dall'app)</label><input id="waGroupName" value="${state.club.whatsappGroupName||''}" placeholder="Es. Soci TC Lello de Mita"></div>
+      <div class="field"><label>Soglia assenze per suggerire un recupero</label><input id="waThreshold" type="number" min="1" value="${absenceThreshold}"></div>
       <div class="field"><label>Messaggio predefinito</label>
         <textarea id="waTemplate" rows="4" style="width:100%;background:var(--board);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:10px;font-family:var(--font-body);font-size:14px;">${state.club.whatsappTemplate||"Si è liberato un campo: {giorno} {data} alle {ora} su {campo}. Chi fosse interessato può prenotarlo sull'app!"}</textarea>
       </div>
       <div class="hint">Segnaposto disponibili: {giorno} {data} {ora} {campo}</div>
       <button class="btn-ghost" id="saveWaBtn" style="width:100%;margin-top:8px;">Salva messaggio</button>
     </div>
+
+    <div class="card">
+      <div class="section-title">Recuperi suggeriti (${recuperiSuggeriti.length})</div>
+      <div class="hint" style="margin-bottom:8px;">Corsisti con almeno ${absenceThreshold} assenze registrate, individuati automaticamente su tutti i corsi, con un corso alternativo dello stesso livello e posti liberi (se esiste).</div>
+      <div id="recuperiList">${recuperiSuggeriti.length ? '' : '<div class="hint">Nessun recupero da proporre al momento.</div>'}</div>
+    </div>
   `;
   host.replaceChildren(screen);
+
+  const recuperiHost = screen.querySelector('#recuperiList');
+  recuperiSuggeriti.forEach(r=>{
+    const row = document.createElement('div'); row.className='list-row';
+    row.innerHTML = `<span>${r.student.name} · ${r.course.name} (${r.absences} assenze)${r.alt?' · consigliato: '+r.alt.name:' · nessun corso alternativo dello stesso livello con posti liberi'}</span>`;
+    if(r.student.phone){
+      const waBtn = document.createElement('button');
+      waBtn.className='small-btn'; waBtn.style.padding='6px 10px'; waBtn.style.fontSize='11px';
+      waBtn.textContent = 'Invita';
+      waBtn.onclick = () => {
+        const digits = normalizePhone(r.student.phone);
+        const altText = r.alt
+          ? `Ti proponiamo di recuperare nel corso "${r.alt.name}" (${r.alt.livello||''}).`
+          : `Contattaci per trovare insieme l'orario migliore per recuperare.`;
+        const msg = `Ciao ${r.student.name}, dal ${CLUB_NAME}: abbiamo notato ${r.absences} assenze nel corso "${r.course.name}" (${r.course.livello||''}). ${altText}`;
+        window.open(`https://wa.me/${digits}?text=${encodeURIComponent(msg)}`, '_blank');
+      };
+      row.appendChild(waBtn);
+    }
+    recuperiHost.appendChild(row);
+  });
 
   screen.querySelector('.period-strip').querySelectorAll('button').forEach(b=>{
     b.onclick = () => { state.adminPeriod = b.dataset.p; renderApp(); };
@@ -1765,9 +1819,10 @@ function renderAdminScreen(host){
   screen.querySelector('#saveWaBtn').onclick = async () => {
     const template = screen.querySelector('#waTemplate').value.trim();
     const groupName = screen.querySelector('#waGroupName').value.trim();
+    const threshold = parseInt(screen.querySelector('#waThreshold').value,10) || 2;
     try{
-      await update(ref(db, cpath('info')), { whatsappTemplate: template, whatsappGroupName: groupName });
-      toast('Messaggio salvato');
+      await update(ref(db, cpath('info')), { whatsappTemplate: template, whatsappGroupName: groupName, absenceThreshold: threshold });
+      toast('Impostazioni salvate');
     }catch(e){ toast('Errore: '+e.message); }
   };
 }
