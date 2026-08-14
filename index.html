@@ -135,6 +135,18 @@ const WEEKDAY_FULL = ['Domenica','Lunedì','Martedì','Mercoledì','Giovedì','V
 
 function cpath(p){ return 'clubs/'+CLUB_PATH+(p?('/'+p):''); }
 function dateKey(d){ return d.toISOString().slice(0,10); }
+function mondayOf(dateStr){
+  const d = new Date(dateStr+'T00:00:00');
+  const day = d.getDay();
+  const diff = (day===0 ? -6 : 1-day);
+  d.setDate(d.getDate()+diff);
+  return dateKey(d);
+}
+function addDays(dateStr, n){
+  const d = new Date(dateStr+'T00:00:00');
+  d.setDate(d.getDate()+n);
+  return dateKey(d);
+}
 function fmtDateDisplay(dateStr){ const [y,m,d] = dateStr.split('-'); return d+'-'+m+'-'+y; }
 function todayKey(){ return dateKey(new Date()); }
 function fmtDay(d){ return { dow: IT_DOW[d.getDay()], num: d.getDate() }; }
@@ -301,7 +313,7 @@ const state = {
   draftSessions: [{ weekday: 1, hour: OPEN_HOUR, courtId: null }],
   selectedTeacherUid: '',
   myTeachingBookings: {},
-  maestroDate: todayKey(),
+  maestroWeekStart: null,
 };
 let privateListenerAttached = false;
 let fatalShown = false;
@@ -657,13 +669,7 @@ function renderCourts(host){
       <div class="mode-choice" id="modeChoice">
         ${MODES.map(m=>`<button data-mode="${m.id}" class="${state.selectedMode===m.id?'sel':''}">${m.label}${state.isAdmin?`<br><span style="opacity:.7;">€ ${state.club.rates[m.id]}/h</span>`:''}</button>`).join('')}
       </div>
-      ${state.selectedMode==='lezione' ? `
-      <div class="field" style="margin-top:10px;"><label>Maestro</label>
-        <select id="teacherSelect">
-          <option value="">— seleziona il maestro —</option>
-          ${Object.entries(state.members||{}).filter(([_,m])=>m.uid && state.teachers[m.uid]).sort((a,b)=>a[1].name.localeCompare(b[1].name)).map(([id,m])=>`<option value="${m.uid}" ${state.selectedTeacherUid===m.uid?'selected':''}>${m.name}</option>`).join('')}
-        </select>
-      </div>` : ''}
+      ${state.selectedMode==='lezione' ? `<div class="hint" style="margin-top:8px;">Il maestro si sceglie al momento di toccare l'ora libera: vedrai solo quelli disponibili in quello slot.</div>` : ''}
     </div>
     <div class="day-strip" id="dayStrip"></div>
     <div id="courtsHost"></div>
@@ -679,8 +685,6 @@ function renderCourts(host){
   screen.querySelector('#modeChoice').querySelectorAll('button').forEach(b=>{
     b.onclick = () => { state.selectedMode = b.dataset.mode; renderApp(); };
   });
-  const teacherSelect = screen.querySelector('#teacherSelect');
-  if(teacherSelect) teacherSelect.onchange = (e)=>{ state.selectedTeacherUid = e.target.value; };
 
   const strip = screen.querySelector('#dayStrip');
   days.forEach(d=>{
@@ -759,14 +763,12 @@ function renderCourts(host){
         slotEl.onclick = () => {
           const target = resolveBookingTarget(meObj);
           if(!target) return;
-          const teacherList = Object.entries(state.members||{}).filter(([_,m])=>m.uid && state.teachers[m.uid]);
-          if(state.selectedMode==='lezione' && teacherList.length && !state.selectedTeacherUid){
-            toast('Seleziona il maestro per la lezione');
-            return;
+          if(state.selectedMode==='lezione'){
+            openTeacherPickerAndBook(court, h, label, target);
+          } else {
+            const confirmMsg = 'Confermi la prenotazione delle '+label+' su '+court.name+' ('+modeLabel(state.selectedMode)+(target.uid!==state.uid?' per '+target.memberName:'')+')?\n\nRicorda: non sarà annullabile nelle 24 ore precedenti l\'orario.';
+            if(confirm(confirmMsg)) bookSlot(court, h, target);
           }
-          const teacherName = state.selectedMode==='lezione' && state.selectedTeacherUid ? (teacherList.find(([_,m])=>m.uid===state.selectedTeacherUid)||[])[1]?.name : null;
-          const confirmMsg = 'Confermi la prenotazione delle '+label+' su '+court.name+' ('+modeLabel(state.selectedMode)+(teacherName?' con '+teacherName:'')+(target.uid!==state.uid?' per '+target.memberName:'')+')?\n\nRicorda: non sarà annullabile nelle 24 ore precedenti l\'orario.';
-          if(confirm(confirmMsg)) bookSlot(court, h, target);
         };
       }
       row.appendChild(slotEl);
@@ -777,6 +779,57 @@ function renderCourts(host){
 
   screen.querySelector('#openProfile').onclick = () => renderProfileModal();
   screen.querySelector('#notMe').onclick = doLogout;
+}
+
+function getBusyTeacherUidsAt(dateStr, hour){
+  const busy = new Set();
+  Object.values(state.bookingsPublic||{}).forEach(b=>{
+    if(b.date===dateStr && b.hour===hour && b.mode==='lezione' && b.teacherUid) busy.add(b.teacherUid);
+  });
+  Object.values(state.courses||{}).forEach(c=>{
+    if(!c.teacherUid) return;
+    if(dateStr < c.startDate || dateStr > c.endDate) return;
+    const dow = new Date(dateStr+'T00:00:00').getDay();
+    const hasSession = getCourseSessions(c).some(s=>s.weekday===dow && s.hour===hour);
+    if(hasSession) busy.add(c.teacherUid);
+  });
+  return busy;
+}
+
+function openTeacherPickerAndBook(court, hour, label, target){
+  const busy = getBusyTeacherUidsAt(state.selectedDate, hour);
+  const available = Object.entries(state.members||{})
+    .filter(([_,m])=>m.uid && state.teachers[m.uid] && !busy.has(m.uid))
+    .sort((a,b)=>a[1].name.localeCompare(b[1].name));
+
+  if(!available.length){
+    toast('Nessun maestro disponibile in questo slot (già impegnati su un altro campo).');
+    return;
+  }
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <h4>Lezione — ${label} · ${court.name}</h4>
+      <div class="field"><label>Maestro disponibile</label>
+        <select id="pickTeacher">
+          ${available.map(([id,m])=>`<option value="${m.uid}">${m.name}</option>`).join('')}
+        </select>
+      </div>
+      <div class="hint">Non sarà annullabile nelle 24 ore precedenti l'orario.</div>
+      <div class="btn-row">
+        <button class="btn-ghost" id="cancelPick">Annulla</button>
+        <button class="btn-primary" id="confirmPick">Conferma prenotazione</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#cancelPick').onclick = () => overlay.remove();
+  overlay.querySelector('#confirmPick').onclick = () => {
+    state.selectedTeacherUid = overlay.querySelector('#pickTeacher').value;
+    overlay.remove();
+    bookSlot(court, hour, target);
+  };
 }
 
 function resolveBookingTarget(meObj){
@@ -1173,61 +1226,82 @@ function nextSessionDate(course){
 
 /* ================= Vista Maestro ================= */
 function renderMaestroScreen(host){
-  const myCourseSessionsToday = Object.entries(state.courses||{})
-    .filter(([_,c])=> c.teacherUid===state.uid && getCourseSessions(c).some(s=>{
-      const dow = new Date(state.maestroDate+'T00:00:00').getDay();
-      return s.weekday===dow && state.maestroDate>=c.startDate && state.maestroDate<=c.endDate;
-    }));
+  if(!state.maestroWeekStart) state.maestroWeekStart = mondayOf(todayKey());
+  const weekDays = Array.from({length:7}, (_,i)=>addDays(state.maestroWeekStart, i));
 
-  const lessonsToday = Object.entries(state.myTeachingBookings||{})
-    .filter(([_,l])=>l.date===state.maestroDate)
-    .sort((a,b)=>a[1].hour-b[1].hour);
+  const myCourses = Object.entries(state.courses||{}).filter(([_,c])=>c.teacherUid===state.uid);
 
-  const totHours = lessonsToday.length;
-  const totRevenue = lessonsToday.reduce((sum,[_,l])=>sum+(typeof l.rate==='number'?l.rate:0), 0);
+  let weekHours = 0, weekRevenue = 0;
+  const dayData = weekDays.map(dateStr=>{
+    const lessons = Object.entries(state.myTeachingBookings||{})
+      .filter(([_,l])=>l.date===dateStr).sort((a,b)=>a[1].hour-b[1].hour);
+    const dow = new Date(dateStr+'T00:00:00').getDay();
+    const sessions = [];
+    myCourses.forEach(([cid,c])=>{
+      if(dateStr < c.startDate || dateStr > c.endDate) return;
+      getCourseSessions(c).filter(s=>s.weekday===dow).forEach(s=>{
+        const court = (state.club.courts||[]).find(x=>x.id===s.courtId);
+        sessions.push({ hour: s.hour, courtName: court?court.name:'', courseName: c.name, enrolled: c.enrolledCount||0 });
+      });
+    });
+    sessions.sort((a,b)=>a.hour-b.hour);
+    const hours = lessons.length;
+    const revenue = lessons.reduce((sum,[_,l])=>sum+(typeof l.rate==='number'?l.rate:0),0);
+    weekHours += hours; weekRevenue += revenue;
+    return { dateStr, lessons, sessions, hours, revenue };
+  });
 
   const screen = document.createElement('div');
   screen.className = 'screen';
   screen.innerHTML = `
     <div class="card">
-      <div class="section-title">Le tue lezioni e corsi</div>
-      <div class="field"><label>Giorno</label><input id="maestroDateInput" type="date" value="${state.maestroDate}"></div>
+      <div class="section-title">Settimana</div>
+      <div class="btn-row">
+        <button class="btn-ghost" id="prevWeek">◀ Prec.</button>
+        <button class="btn-ghost" id="thisWeek">Oggi</button>
+        <button class="btn-ghost" id="nextWeek">Succ. ▶</button>
+      </div>
+      <div class="hint" style="margin-top:8px;text-align:center;">${fmtDateDisplay(weekDays[0])} → ${fmtDateDisplay(weekDays[6])}</div>
+      <div class="totale-box"><span class="l">Ore lezioni nella settimana</span><span class="v">${weekHours}h</span></div>
+      <div class="totale-box"><span class="l">Incasso stimato</span><span class="v">€ ${weekRevenue.toFixed(2)}</span></div>
     </div>
-
-    <div class="card">
-      <div class="section-title">Lezioni individuali — ${fmtDateDisplay(state.maestroDate)}</div>
-      <div id="lessonList">${lessonsToday.length ? '' : '<div class="hint">Nessuna lezione individuale in questo giorno.</div>'}</div>
-      <div class="totale-box"><span class="l">Ore</span><span class="v">${totHours}h</span></div>
-      <div class="totale-box"><span class="l">Incasso lezioni</span><span class="v">€ ${totRevenue.toFixed(2)}</span></div>
-    </div>
-
-    <div class="card">
-      <div class="section-title">Corsi che tieni oggi</div>
-      <div id="courseSessList">${myCourseSessionsToday.length ? '' : '<div class="hint">Nessun corso previsto in questo giorno.</div>'}</div>
-      <div class="hint" style="margin-top:6px;">Le quote dei corsi sono mensili e vengono gestite dall'admin nella tab Corsi — qui vedi solo l'orario.</div>
-    </div>
+    <div id="daysHost"></div>
+    <div class="hint">Le quote dei corsi sono mensili e vengono gestite dall'admin nella tab Corsi — qui vedi solo gli orari.</div>
   `;
   host.replaceChildren(screen);
 
-  const lessonList = screen.querySelector('#lessonList');
-  lessonsToday.forEach(([bid,l])=>{
-    const row = document.createElement('div'); row.className='list-row';
-    row.innerHTML = `<span>${String(l.hour).padStart(2,'0')}:00 · ${l.courtName||''} · ${l.clientName}</span><span class="pill">€ ${(l.rate||0).toFixed(2)}</span>`;
-    lessonList.appendChild(row);
-  });
+  screen.querySelector('#prevWeek').onclick = () => { state.maestroWeekStart = addDays(state.maestroWeekStart, -7); renderApp(); };
+  screen.querySelector('#nextWeek').onclick = () => { state.maestroWeekStart = addDays(state.maestroWeekStart, 7); renderApp(); };
+  screen.querySelector('#thisWeek').onclick = () => { state.maestroWeekStart = mondayOf(todayKey()); renderApp(); };
 
-  const courseSessList = screen.querySelector('#courseSessList');
-  myCourseSessionsToday.forEach(([cid,c])=>{
-    const sessionsToday = getCourseSessions(c).filter(s=>s.weekday===new Date(state.maestroDate+'T00:00:00').getDay());
-    sessionsToday.forEach(s=>{
-      const court = (state.club.courts||[]).find(x=>x.id===s.courtId);
+  const daysHost = screen.querySelector('#daysHost');
+  dayData.forEach(d=>{
+    const dow = new Date(d.dateStr+'T00:00:00').getDay();
+    const isToday = d.dateStr===todayKey();
+    const card = document.createElement('div');
+    card.className = 'card';
+    if(isToday) card.style.borderColor = 'var(--ball-dim)';
+    card.innerHTML = `
+      <div class="section-title">${WEEKDAY_FULL[dow]} ${fmtDateDisplay(d.dateStr)}${isToday?' · oggi':''}</div>
+      ${(!d.lessons.length && !d.sessions.length) ? '<div class="hint">Niente in programma.</div>' : ''}
+      <div id="lessons-${d.dateStr}"></div>
+      <div id="sessions-${d.dateStr}"></div>
+      ${d.hours ? `<div class="list-row"><span>Totale giornata</span><span class="pill">${d.hours}h · € ${d.revenue.toFixed(2)}</span></div>` : ''}
+    `;
+    daysHost.appendChild(card);
+    const lessonsHost = card.querySelector('#lessons-'+d.dateStr);
+    d.lessons.forEach(([bid,l])=>{
       const row = document.createElement('div'); row.className='list-row';
-      row.innerHTML = `<span>${String(s.hour).padStart(2,'0')}:00 · ${court?court.name:''} · ${c.name}</span><span class="pill">${c.enrolledCount||0} iscritti</span>`;
-      courseSessList.appendChild(row);
+      row.innerHTML = `<span>${String(l.hour).padStart(2,'0')}:00 · ${l.courtName||''} · ${l.clientName} <span class="pill" style="padding:2px 7px;">lezione</span></span><span class="pill">€ ${(l.rate||0).toFixed(2)}</span>`;
+      lessonsHost.appendChild(row);
+    });
+    const sessionsHost = card.querySelector('#sessions-'+d.dateStr);
+    d.sessions.forEach(s=>{
+      const row = document.createElement('div'); row.className='list-row';
+      row.innerHTML = `<span>${String(s.hour).padStart(2,'0')}:00 · ${s.courtName} · ${s.courseName} <span class="pill" style="padding:2px 7px;">corso</span></span><span class="pill">${s.enrolled} iscritti</span>`;
+      sessionsHost.appendChild(row);
     });
   });
-
-  screen.querySelector('#maestroDateInput').onchange = (e)=>{ state.maestroDate = e.target.value; renderApp(); };
 }
 
 /* ================= Vista Soci ================= */
