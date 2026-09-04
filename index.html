@@ -19,6 +19,8 @@
     color:var(--ink);font-family:var(--font-body);min-height:100vh;-webkit-font-smoothing:antialiased;}
   #app{max-width:520px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column;padding-bottom:40px;}
   .court-header{padding:22px 18px 14px;border-bottom:1px solid var(--line);position:relative;}
+  .header-profile{position:absolute;top:18px;right:18px;display:flex;align-items:center;gap:8px;}
+  .header-profile .link{padding:0;}
   .court-header .eyebrow{font-family:var(--font-mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ball);opacity:.85;margin-bottom:6px;}
   .court-header h1{font-family:var(--font-display);font-weight:600;font-size:24px;letter-spacing:.01em;margin:0;text-transform:uppercase;}
   .court-line{height:2px;background:linear-gradient(90deg,var(--clay),transparent 70%);margin-top:14px;position:relative;}
@@ -238,6 +240,7 @@ function renderProfileModal(){
   overlay.innerHTML = `
     <div class="modal">
       <h4>Il tuo profilo</h4>
+      <div class="hint" style="text-align:center;">Account collegato: <b style="color:var(--chalk);">${state.email||'—'}</b></div>
       <div style="display:flex;flex-direction:column;align-items:center;gap:10px;" id="avatarPreviewHost"></div>
       <input type="file" accept="image/*" id="photoInput" style="display:none;">
       <button class="btn-ghost" id="pickPhotoBtn">Cambia foto</button>
@@ -288,6 +291,7 @@ const state = {
   admins: {},
   isAdmin: false,
   isSuperAdmin: false,
+  email: '',
   teachers: {},
   isTeacher: false,
   members: {},
@@ -355,7 +359,8 @@ function boot(){
       return;
     }
     state.uid = user.uid;
-    state.isSuperAdmin = (user.email === SUPER_ADMIN_EMAIL);
+    state.email = user.email || '';
+    state.isSuperAdmin = (state.email.toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase());
     try{
       await ensureBootstrap();
     }catch(e){
@@ -606,8 +611,13 @@ function renderCompleteProfile(){
 function renderApp(){
   if(!state.club) return;
   const activeTab = state.tab;
+  const meObjHeader = state.members[state.me] || {name:''};
   root.innerHTML = `
     <div class="court-header">
+      <div class="header-profile" id="headerProfile">
+        ${avatarHtml(meObjHeader, 30)}
+        <button class="link" id="headerEsci">esci</button>
+      </div>
       <div class="eyebrow">${state.club.name}</div>
       <h1>${activeTab==='campi' ? 'Campi' : activeTab==='soci' ? 'Soci' : activeTab==='corsi' ? 'Corsi' : activeTab==='maestro' ? 'Il tuo gestionale' : activeTab==='registro' ? 'Registro' : 'Amministrazione'}</h1>
       <div class="court-line"></div>
@@ -622,6 +632,9 @@ function renderApp(){
       ${state.isSuperAdmin ? `<button data-tab="registro" class="${activeTab==='registro'?'active':''}">Registro</button>` : ''}
     </div>`;
   root.querySelectorAll('.tabbar button').forEach(b=>{ b.onclick = () => { state.tab = b.dataset.tab; renderApp(); }; });
+  root.querySelector('#headerProfile').querySelector('.avatar,.avatar-initials').style.cursor = 'pointer';
+  root.querySelector('#headerProfile').querySelector('.avatar,.avatar-initials').onclick = () => renderProfileModal();
+  root.querySelector('#headerEsci').onclick = doLogout;
   const host = document.getElementById('screenHost');
   if(activeTab==='campi') renderCourts(host);
   else if(activeTab==='corsi') renderCorsiScreen(host);
@@ -704,13 +717,6 @@ function renderCourts(host){
   const screen = document.createElement('div');
   screen.className = 'screen';
   screen.innerHTML = `
-    <div class="who-bar">
-      <div class="me">${avatarHtml(meObj, 34)}Prenoti come <b>${meObj.name}</b></div>
-      <div style="display:flex;gap:12px;">
-        <button class="link" id="openProfile">profilo</button>
-        <button class="link" id="notMe">esci</button>
-      </div>
-    </div>
     <div class="today-tally">
       <div><div class="lbl">Ore giocate oggi</div></div>
       <div class="num">${myHoursToday}h</div>
@@ -842,9 +848,6 @@ function renderCourts(host){
     block.appendChild(row);
     courtsHost.appendChild(block);
   });
-
-  screen.querySelector('#openProfile').onclick = () => renderProfileModal();
-  screen.querySelector('#notMe').onclick = doLogout;
 }
 
 function getBusyTeacherUidsAt(dateStr, hour){
