@@ -477,7 +477,11 @@ function attachListeners(){
   }, showFatalError);
 }
 
+const paymentListenersLoaded = new Set();
 function loadCoursePayment(cid, eid){
+  const key = cid+'|'+eid;
+  if(paymentListenersLoaded.has(key)) return;
+  paymentListenersLoaded.add(key);
   onValue(ref(db, cpath('coursePayments/'+cid+'/'+eid)), s=>{
     if(!state.coursePayments[cid]) state.coursePayments[cid] = {};
     state.coursePayments[cid][eid] = s.val()||{};
@@ -486,6 +490,9 @@ function loadCoursePayment(cid, eid){
 }
 
 function loadCoursePaymentsForCourse(cid){
+  const key = 'course|'+cid;
+  if(paymentListenersLoaded.has(key)) return;
+  paymentListenersLoaded.add(key);
   onValue(ref(db, cpath('coursePayments/'+cid)), s=>{
     state.coursePayments[cid] = s.val()||{};
     renderCurrent();
@@ -497,7 +504,10 @@ function isTeacherOfCourse(cid){
   return !!(c && state.teachers[state.uid] && c.teacherUid === state.uid);
 }
 
+const enrollmentListenersLoaded = new Set();
 function loadCourseEnrollments(cid){
+  if(enrollmentListenersLoaded.has(cid)) return;
+  enrollmentListenersLoaded.add(cid);
   onValue(ref(db, cpath('courseEnrollments/'+cid)), s=>{
     state.courseEnrollments[cid] = s.val()||{};
     renderCurrent();
