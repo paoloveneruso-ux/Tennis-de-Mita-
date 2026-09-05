@@ -142,8 +142,8 @@ const modeLabel = id => (ALL_MODES.find(m=>m.id===id)||{}).label || id;
 
 const MIN_CANCEL_HOURS = 24;
 const MAX_ADVANCE_DAYS = 7;
-const OPEN_HOUR = 8;
-const CLOSE_HOUR = 22;
+const OPEN_HOUR = 7;
+const CLOSE_HOUR = 23;
 const IT_DOW = ['DOM','LUN','MAR','MER','GIO','VEN','SAB'];
 const WEEKDAY_FULL = ['Domenica','Lunedì','Martedì','Mercoledì','Giovedì','Venerdì','Sabato'];
 
@@ -259,6 +259,79 @@ function compressImageFile(file, maxDim=220, quality=0.72){
   });
 }
 
+const DEFAULT_PRICE_REDUCTION_REASONS = ['Palleggiatore','Non socio','Ragazze'];
+function getPriceReductionReasons(){
+  return (state.club && state.club.priceReductionReasons) || DEFAULT_PRICE_REDUCTION_REASONS;
+}
+
+function openEditPriceModal({ bid, currentRate, memberName, courtId, courtName, date, hour, mode }){
+  document.querySelectorAll('.modal-overlay').forEach(el=>el.remove());
+  const reasons = getPriceReductionReasons();
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <h4>Modifica quota</h4>
+      <div class="hint">${memberName} · ${courtName} · ${fmtDateDisplay(date)} ${String(hour).padStart(2,'0')}:00</div>
+      <div class="field"><label>Nuova quota (€)</label><input id="newRateInput" type="number" min="0" step="0.5" value="${currentRate}"></div>
+      <div class="field" id="reasonWrap" style="display:none;">
+        <label>Motivo della riduzione</label>
+        <select id="reasonSelect">
+          ${reasons.map(r=>`<option value="${r}">${r}</option>`).join('')}
+          <option value="__altro__">Altro…</option>
+        </select>
+      </div>
+      <div class="field" id="reasonCustomWrap" style="display:none;"><label>Specifica il motivo</label><input id="reasonCustomInput" placeholder="Es. Torneo sociale"></div>
+      <div class="btn-row">
+        <button class="btn-ghost" id="cancelEditPrice">Annulla</button>
+        <button class="btn-primary" id="confirmEditPrice">Salva</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  const rateInput = overlay.querySelector('#newRateInput');
+  const reasonWrap = overlay.querySelector('#reasonWrap');
+  const reasonSelect = overlay.querySelector('#reasonSelect');
+  const reasonCustomWrap = overlay.querySelector('#reasonCustomWrap');
+  function syncReasonVisibility(){
+    const newRate = parseFloat(rateInput.value);
+    reasonWrap.style.display = (!isNaN(newRate) && newRate < currentRate) ? 'flex' : 'none';
+    reasonCustomWrap.style.display = (reasonWrap.style.display==='flex' && reasonSelect.value==='__altro__') ? 'flex' : 'none';
+  }
+  rateInput.oninput = syncReasonVisibility;
+  reasonSelect.onchange = syncReasonVisibility;
+  syncReasonVisibility();
+
+  overlay.querySelector('#cancelEditPrice').onclick = () => overlay.remove();
+  overlay.querySelector('#confirmEditPrice').onclick = async () => {
+    const newRate = parseFloat(rateInput.value);
+    if(isNaN(newRate) || newRate<0){ toast('Importo non valido'); return; }
+    let reason = null;
+    const isReduction = newRate < currentRate;
+    if(isReduction){
+      reason = reasonSelect.value === '__altro__' ? overlay.querySelector('#reasonCustomInput').value.trim() : reasonSelect.value;
+      if(!reason){ toast('Indica un motivo per la riduzione'); return; }
+    }
+    try{
+      await update(ref(db, cpath('bookingsPrivate/'+bid)), { rate: newRate });
+      if(isReduction && reasonSelect.value==='__altro__' && !reasons.includes(reason)){
+        await update(ref(db, cpath('info')), { priceReductionReasons: [...reasons, reason] });
+      }
+      writeAuditLog({
+        type:'modifica_quota', forMemberName: memberName, courtId, courtName,
+        date, hour, mode, oldRate: currentRate, newRate, reason
+      });
+      if(mode==='normale' || mode==='doppio'){
+        const statRef = push(ref(db, cpath('rateChangeStats')));
+        set(statRef, { forMemberName: memberName, courtId, date, hour, mode, oldRate: currentRate, newRate, reason, timestamp: Date.now() })
+          .catch(e=>console.error('rateChangeStats', e));
+      }
+      toast('Quota aggiornata: € '+newRate.toFixed(2));
+      overlay.remove();
+    }catch(e){ toast('Errore: '+e.message); }
+  };
+}
+
 function renderProfileModal(){
   document.querySelectorAll('.modal-overlay').forEach(el=>el.remove());
   const meObj = state.members[state.me] || {name:''};
@@ -269,6 +342,7 @@ function renderProfileModal(){
       <h4>Il tuo profilo</h4>
       <div class="hint" style="text-align:center;">Account collegato: <b style="color:var(--chalk);">${state.email||'—'}</b></div>
       <div style="display:flex;flex-direction:column;align-items:center;gap:10px;" id="avatarPreviewHost"></div>
+      <div class="list-row"><span>Quota sociale ${new Date().getFullYear()}</span><span class="pill" style="${state.myMembershipFees[new Date().getFullYear()]?.paidAt?'':'color:var(--danger);border-color:var(--danger);'}">${state.myMembershipFees[new Date().getFullYear()]?.paidAt ? 'Pagata · € '+state.myMembershipFees[new Date().getFullYear()].amount.toFixed(2) : 'Da pagare'}</span></div>
       <input type="file" accept="image/*" id="photoInput" style="display:none;">
       <button class="btn-ghost" id="pickPhotoBtn">Cambia foto</button>
       <div class="field"><label>Nome e cognome</label><input id="profName" value="${meObj.name||''}"></div>
@@ -325,6 +399,7 @@ const state = {
   bookingsPublic: {},
   bookingsPrivate: {},   // popolato solo se admin
   cancellationStats: {}, // popolato solo se admin
+  rateChangeStats: {},   // popolato solo se admin
   myBookingIds: {},
   blocks: {},
   courses: {},
@@ -357,6 +432,8 @@ const state = {
   auditFrom: '',
   auditTo: '',
   myLoyaltyConfirmed: {},
+  myMembershipFees: {},
+  adminMembershipFees: {}, // { [uid]: {year: {amount, paidAt}} } popolato solo admin
   loyaltyRedemptions: {},
   loyaltyAllConfirmed: {}, // popolato solo per admin (scansione fedeltà)
   confirmPartnerBid: null,
@@ -508,6 +585,7 @@ function attachListeners(){
       privateListenerAttached = true;
       onValue(ref(db, cpath('bookingsPrivate')), s2=>{ state.bookingsPrivate = s2.val()||{}; renderCurrent(); }, err=>console.error('bookingsPrivate', err));
       onValue(ref(db, cpath('cancellationStats')), s3=>{ state.cancellationStats = s3.val()||{}; renderCurrent(); }, err=>console.error('cancellationStats', err));
+      onValue(ref(db, cpath('rateChangeStats')), s4=>{ state.rateChangeStats = s4.val()||{}; renderCurrent(); }, err=>console.error('rateChangeStats', err));
     }
     renderCurrent();
   }, showFatalError);
@@ -520,6 +598,7 @@ function attachListeners(){
   onValue(ref(db, cpath('courses')), s=>{ state.courses = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('recurringBookings')), s=>{ state.recurringBookings = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('loyaltyConfirmedBookings/'+state.uid)), s=>{ state.myLoyaltyConfirmed = s.val()||{}; renderCurrent(); }, showFatalError);
+  onValue(ref(db, cpath('membershipFees/'+state.uid)), s=>{ state.myMembershipFees = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('loyaltyRedemptions/'+state.uid)), s=>{ state.loyaltyRedemptions[state.uid] = s.val()||{}; renderCurrent(); }, showFatalError);
   if(state.isSuperAdmin){
     onValue(ref(db, cpath('auditLog')), s=>{ state.auditLog = s.val()||{}; renderCurrent(); }, err=>console.error('auditLog', err));
@@ -529,6 +608,16 @@ function attachListeners(){
     Object.entries(state.myEnrollments).forEach(([cid,eid])=> loadCoursePayment(cid, eid));
     renderCurrent();
   }, showFatalError);
+}
+
+const membershipFeeScanLoaded = new Set();
+function loadMembershipFeeForMember(uid){
+  if(membershipFeeScanLoaded.has(uid)) return;
+  membershipFeeScanLoaded.add(uid);
+  onValue(ref(db, cpath('membershipFees/'+uid)), s=>{
+    state.adminMembershipFees[uid] = s.val()||{};
+    renderCurrent();
+  }, err=>console.error('membershipFees', err));
 }
 
 const loyaltyScanLoaded = new Set();
@@ -911,11 +1000,34 @@ function renderCourts(host){
 }
 
 /* ================= Raccolta punti: progresso + conferma compagno ================= */
-function renderLoyaltySection(host, meObj){
+function computeLoyaltyProgress(confirmedMap, redemptionsMap){
   const bands = getLoyaltyBands();
-  const confirmed = Object.values(state.myLoyaltyConfirmed||{});
-  const redemptions = state.loyaltyRedemptions[state.uid] || {};
+  const confirmed = Object.values(confirmedMap||{});
+  const redemptions = redemptionsMap || {};
+  return bands.map(band=>{
+    const count = confirmed.filter(c=>c.band===band.id).length;
+    const earned = Math.floor(count / band.threshold);
+    const redeemed = redemptions[band.id] || 0;
+    const available = Math.max(0, earned - redeemed);
+    const progressInCycle = count % band.threshold;
+    const pct = Math.round((progressInCycle / band.threshold) * 100);
+    return { band, count, earned, redeemed, available, progressInCycle, pct };
+  });
+}
+function loyaltyBarHtml(p){
+  return `
+    <div style="margin-bottom:12px;">
+      <div class="hint" style="display:flex;justify-content:space-between;margin-bottom:4px;">
+        <span><b style="color:var(--chalk);">${p.band.label}</b></span>
+        <span>${p.progressInCycle}/${p.band.threshold}h${p.available>0?' · <span style="color:var(--ball);">'+p.available+' ora gratis pronta'+(p.available>1?'e':'')+'!</span>':''}</span>
+      </div>
+      <div style="background:var(--board);border:1px solid var(--line);border-radius:6px;height:14px;overflow:hidden;">
+        <div style="width:${p.pct}%;height:100%;background:var(--ball);"></div>
+      </div>
+    </div>`;
+}
 
+function renderLoyaltySection(host, meObj){
   const now = new Date();
   // Trova le mie prenotazioni passate (non lezione, non ancora confermate) da proporre per la conferma compagno
   const toConfirm = Object.keys(state.myBookingIds||{})
@@ -935,25 +1047,9 @@ function renderLoyaltySection(host, meObj){
   host.replaceChildren(card);
 
   const barsHost = card.querySelector('#loyaltyBars');
-  bands.forEach(band=>{
-    const count = confirmed.filter(c=>c.band===band.id).length;
-    const earned = Math.floor(count / band.threshold);
-    const redeemed = redemptions[band.id] || 0;
-    const available = Math.max(0, earned - redeemed);
-    const progressInCycle = count % band.threshold;
-    const pct = Math.round((progressInCycle / band.threshold) * 100);
-    const row = document.createElement('div');
-    row.style.marginBottom = '12px';
-    row.innerHTML = `
-      <div class="hint" style="display:flex;justify-content:space-between;margin-bottom:4px;">
-        <span><b style="color:var(--chalk);">${band.label}</b></span>
-        <span>${progressInCycle}/${band.threshold}h${available>0?' · <span style="color:var(--ball);">'+available+' ora gratis pronta'+(available>1?'e':'')+'!</span>':''}</span>
-      </div>
-      <div style="background:var(--board);border:1px solid var(--line);border-radius:6px;height:14px;overflow:hidden;">
-        <div style="width:${pct}%;height:100%;background:var(--ball);"></div>
-      </div>
-    `;
-    barsHost.appendChild(row);
+  const progress = computeLoyaltyProgress(state.myLoyaltyConfirmed, state.loyaltyRedemptions[state.uid]);
+  progress.forEach(p=>{
+    barsHost.insertAdjacentHTML('beforeend', loyaltyBarHtml(p));
   });
 
   if(toConfirm.length){
@@ -1663,7 +1759,7 @@ function renderSuperAdminScreen(host){
     const d = new Date(e.timestamp);
     const when = d.toLocaleDateString('it-IT')+' '+d.toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'});
     const row = document.createElement('div'); row.className='list-row';
-    const rateDetail = e.type==='modifica_quota' ? ` · € ${(e.oldRate||0).toFixed(2)} → € ${(e.newRate||0).toFixed(2)}` : '';
+    const rateDetail = e.type==='modifica_quota' ? ` · € ${(e.oldRate||0).toFixed(2)} → € ${(e.newRate||0).toFixed(2)}${e.reason?' · motivo: '+e.reason:''}` : '';
     row.innerHTML = `<span>
       <b style="color:${typeColors[e.type]||'var(--ball)'};">${typeLabels[e.type]||e.type}</b> di <b>${e.byName}</b><br>
       <span class="hint">${when} · per ${e.forMemberName||'—'} · ${e.courtName||''} ${e.date?fmtDateDisplay(e.date):''} ${e.hour!==undefined?String(e.hour).padStart(2,'0')+':00':''} · ${modeLabel(e.mode)}${rateDetail}</span>
@@ -1695,11 +1791,62 @@ function renderMembersScreen(host){
       row.className = 'member-row';
       const isAdm = !!state.admins[m.uid];
       row.innerHTML = `<span class="name" style="display:flex;align-items:center;gap:10px;">${avatarHtml(m,34)}${m.name}${id===state.me?' · <span style="color:var(--ball);font-size:11px;">tu</span>':''}</span>${isAdm?'<span class="pill adminpill">Admin</span>':''}`;
+      if(state.isAdmin && m.uid){
+        row.style.cursor = 'pointer';
+        row.onclick = () => renderMemberDetailModal(m);
+      }
       memList.appendChild(row);
     });
   }
   paint('');
   screen.querySelector('#memberSearch').oninput = (e)=> paint(e.target.value);
+}
+
+/* ================= Dettaglio socio per admin (quota + punti fedeltà) ================= */
+function renderMemberDetailModal(m){
+  loadMembershipFeeForMember(m.uid);
+  loadLoyaltyForMember(m.uid);
+  document.querySelectorAll('.modal-overlay').forEach(el=>el.remove());
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <h4>${m.name}</h4>
+      <div id="memberFeeHost"></div>
+      <div class="section-title" style="margin-top:8px;">Raccolta punti</div>
+      <div id="memberLoyaltyHost"></div>
+      <button class="btn-ghost" id="closeMemberDetail">Chiudi</button>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#closeMemberDetail').onclick = () => overlay.remove();
+
+  function paint(){
+    if(!document.body.contains(overlay)) return;
+    const curYear = new Date().getFullYear();
+    const scan = state.adminMembershipFees[m.uid] || {};
+    const fee = scan[curYear];
+    const feeHost = overlay.querySelector('#memberFeeHost');
+    feeHost.innerHTML = `
+      <div class="list-row"><span>Quota sociale ${curYear}</span><span class="pill" style="${fee?.paidAt?'':'color:var(--danger);border-color:var(--danger);'}">${fee?.paidAt ? 'Pagata · € '+fee.amount.toFixed(2) : 'Da pagare'}</span></div>
+      <div class="field" style="margin-top:8px;"><label>Importo (€)</label><input id="memberFeeAmount" type="number" min="0" step="1" value="${fee?.amount ?? ''}"></div>
+      <button class="btn-primary" id="memberFeeSaveBtn" style="width:100%;margin-top:6px;">Segna pagata</button>
+    `;
+    feeHost.querySelector('#memberFeeSaveBtn').onclick = async () => {
+      const amount = parseFloat(feeHost.querySelector('#memberFeeAmount').value);
+      if(isNaN(amount) || amount<0){ toast('Inserisci un importo valido'); return; }
+      try{
+        await update(ref(db, cpath('membershipFees/'+m.uid+'/'+curYear)), { amount, paidAt: Date.now() });
+        toast('Quota segnata come pagata');
+      }catch(e){ toast('Errore: '+e.message); }
+    };
+
+    const loyaltyScan = state.adminLoyaltyScan[m.uid] || {};
+    const progress = computeLoyaltyProgress(loyaltyScan.confirmed, loyaltyScan.redemptions);
+    overlay.querySelector('#memberLoyaltyHost').innerHTML = progress.map(loyaltyBarHtml).join('');
+  }
+  paint();
+  // Ridisegna quando arrivano i dati (i loader sono asincroni)
+  const interval = setInterval(()=>{ if(!document.body.contains(overlay)){ clearInterval(interval); return; } paint(); }, 500);
 }
 
 /* ================= Admin ================= */
@@ -1823,6 +1970,15 @@ function renderAdminScreen(host){
     byHourCancel[c.hour] = (byHourCancel[c.hour]||0)+1;
   });
   const hourCancelStats = Object.entries(byHourCancel).sort((a,b)=>b[1]-a[1]);
+
+  // Modifiche nelle ultime 24 ore (visibili a ogni admin, senza indicare quale admin)
+  const last24 = Date.now() - 24*3600*1000;
+  const rateChangesRecent = Object.values(state.rateChangeStats||{}).filter(c=>c.timestamp>=last24);
+  const cancelsRecent = cancelEntries.filter(c=>c.timestamp>=last24);
+  const recentChanges = [
+    ...rateChangesRecent.map(c=>({...c, kind:'rate'})),
+    ...cancelsRecent.map(c=>({...c, kind:'cancel'})),
+  ].sort((a,b)=>b.timestamp-a.timestamp);
 
   const screen = document.createElement('div');
   screen.className = 'screen';
@@ -1955,6 +2111,12 @@ function renderAdminScreen(host){
       <div class="hint" style="margin:10px 0 4px;"><b style="color:var(--chalk);">Per ora del giorno</b></div>
       <div id="cancelByHour">${hourCancelStats.length ? '' : '<div class="hint">—</div>'}</div>
     </div>
+
+    <div class="card">
+      <div class="section-title">Modifiche nelle ultime 24 ore (${recentChanges.length})</div>
+      <div class="hint" style="margin-bottom:8px;">Modifiche di tariffa e cancellazioni fatte nelle ultime 24 ore, per tenere sotto controllo cosa cambia sulle ore già giocate.</div>
+      <div id="recentChangesList">${recentChanges.length ? '' : '<div class="hint">Nessuna modifica nelle ultime 24 ore.</div>'}</div>
+    </div>
   `;
   host.replaceChildren(screen);
 
@@ -2083,6 +2245,20 @@ function renderAdminScreen(host){
     cancelByHourHost.appendChild(row);
   });
 
+  const recentChangesHost = screen.querySelector('#recentChangesList');
+  recentChanges.forEach(c=>{
+    const court = (state.club.courts||[]).find(x=>x.id===c.courtId);
+    const d = new Date(c.timestamp);
+    const when = d.toLocaleDateString('it-IT')+' '+d.toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'});
+    const row = document.createElement('div'); row.className='list-row';
+    if(c.kind==='rate'){
+      row.innerHTML = `<span><b style="color:var(--clay);">Modifica quota</b><br><span class="hint">${when} · ${c.forMemberName||'—'} · ${court?court.name:''} ${fmtDateDisplay(c.date)} ${String(c.hour).padStart(2,'0')}:00 · € ${(c.oldRate||0).toFixed(2)} → € ${(c.newRate||0).toFixed(2)}${c.reason?' · motivo: '+c.reason:''}</span></span>`;
+    } else {
+      row.innerHTML = `<span><b style="color:var(--danger);">Cancellazione</b><br><span class="hint">${when} · ${c.forMemberName||'—'} · ${court?court.name:''} ${fmtDateDisplay(c.date)} ${String(c.hour).padStart(2,'0')}:00</span></span>`;
+    }
+    recentChangesHost.appendChild(row);
+  });
+
   screen.querySelector('.period-strip').querySelectorAll('button').forEach(b=>{
     b.onclick = () => { state.adminPeriod = b.dataset.p; renderApp(); };
   });
@@ -2126,19 +2302,8 @@ function renderAdminScreen(host){
     row.innerHTML = `<span>${String(b.hour).padStart(2,'0')}:00 · ${court?court.name:''} · ${b.memberName} · ${modeLabel(b.mode)}${b.teacherName?' · maestro: '+b.teacherName:''} · € ${currentRate.toFixed(2)}</span>`;
     if(b.mode==='normale' || b.mode==='doppio'){
       const editPrice = document.createElement('button'); editPrice.className='small-btn'; editPrice.textContent='Modifica quota';
-      editPrice.onclick = async () => {
-        const input = prompt('Nuova quota per questa ora (€):', currentRate);
-        if(input===null) return;
-        const newRate = parseFloat(input.replace(',','.'));
-        if(isNaN(newRate) || newRate<0){ toast('Importo non valido'); return; }
-        try{
-          await update(ref(db, cpath('bookingsPrivate/'+bid)), { rate: newRate });
-          writeAuditLog({
-            type:'modifica_quota', forMemberName: b.memberName, courtId: b.courtId, courtName: court?court.name:'',
-            date: b.date, hour: b.hour, mode: b.mode, oldRate: currentRate, newRate
-          });
-          toast('Quota aggiornata: € '+newRate.toFixed(2));
-        }catch(e){ toast('Errore: '+e.message); }
+      editPrice.onclick = () => {
+        openEditPriceModal({ bid, currentRate, memberName: b.memberName, courtId: b.courtId, courtName: court?court.name:'', date: b.date, hour: b.hour, mode: b.mode });
       };
       row.appendChild(editPrice);
     }
