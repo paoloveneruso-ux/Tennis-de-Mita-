@@ -324,6 +324,7 @@ const state = {
   members: {},
   bookingsPublic: {},
   bookingsPrivate: {},   // popolato solo se admin
+  cancellationStats: {}, // popolato solo se admin
   myBookingIds: {},
   blocks: {},
   courses: {},
@@ -353,6 +354,8 @@ const state = {
   maestroWeekStart: null,
   auditLog: {},
   auditFilterAdmin: '',
+  auditFrom: '',
+  auditTo: '',
   myLoyaltyConfirmed: {},
   loyaltyRedemptions: {},
   loyaltyAllConfirmed: {}, // popolato solo per admin (scansione fedeltà)
@@ -504,6 +507,7 @@ function attachListeners(){
     if(state.isAdmin && !privateListenerAttached){
       privateListenerAttached = true;
       onValue(ref(db, cpath('bookingsPrivate')), s2=>{ state.bookingsPrivate = s2.val()||{}; renderCurrent(); }, err=>console.error('bookingsPrivate', err));
+      onValue(ref(db, cpath('cancellationStats')), s3=>{ state.cancellationStats = s3.val()||{}; renderCurrent(); }, err=>console.error('cancellationStats', err));
     }
     renderCurrent();
   }, showFatalError);
@@ -1614,7 +1618,15 @@ function renderMaestroScreen(host){
 function renderSuperAdminScreen(host){
   const entries = Object.entries(state.auditLog||{}).sort((a,b)=>b[1].timestamp-a[1].timestamp);
   const adminNames = [...new Set(entries.map(([_,e])=>e.byName).filter(Boolean))].sort();
-  const filtered = state.auditFilterAdmin ? entries.filter(([_,e])=>e.byName===state.auditFilterAdmin) : entries;
+  let filtered = state.auditFilterAdmin ? entries.filter(([_,e])=>e.byName===state.auditFilterAdmin) : entries;
+  if(state.auditFrom){
+    const from = new Date(state.auditFrom+'T00:00:00').getTime();
+    filtered = filtered.filter(([_,e])=>e.timestamp >= from);
+  }
+  if(state.auditTo){
+    const to = new Date(state.auditTo+'T23:59:59').getTime();
+    filtered = filtered.filter(([_,e])=>e.timestamp <= to);
+  }
 
   const screen = document.createElement('div');
   screen.className = 'screen';
@@ -1628,12 +1640,21 @@ function renderSuperAdminScreen(host){
           ${adminNames.map(n=>`<option value="${n}" ${state.auditFilterAdmin===n?'selected':''}>${n}</option>`).join('')}
         </select>
       </div>
-      <div id="auditList">${filtered.length ? '' : '<div class="hint">Nessuna azione registrata.</div>'}</div>
+      <div style="display:flex;gap:8px;">
+        <div class="field"><label>Da</label><input id="auditFromInput" type="date" value="${state.auditFrom}"></div>
+        <div class="field"><label>A</label><input id="auditToInput" type="date" value="${state.auditTo}"></div>
+      </div>
+      ${(state.auditFrom||state.auditTo) ? `<button class="btn-ghost" id="auditClearDates" style="width:100%;margin-top:6px;">Rimuovi filtro data</button>` : ''}
+      <div id="auditList" style="margin-top:10px;">${filtered.length ? '' : '<div class="hint">Nessuna azione registrata in questo periodo.</div>'}</div>
     </div>
   `;
   host.replaceChildren(screen);
 
   screen.querySelector('#auditFilter').onchange = (e)=>{ state.auditFilterAdmin = e.target.value; renderApp(); };
+  screen.querySelector('#auditFromInput').onchange = (e)=>{ state.auditFrom = e.target.value; renderApp(); };
+  screen.querySelector('#auditToInput').onchange = (e)=>{ state.auditTo = e.target.value; renderApp(); };
+  const clearBtn = screen.querySelector('#auditClearDates');
+  if(clearBtn) clearBtn.onclick = () => { state.auditFrom=''; state.auditTo=''; renderApp(); };
 
   const listHost = screen.querySelector('#auditList');
   const typeLabels = { cancellazione:'Cancellazione', prenotazione:'Prenotazione', modifica_quota:'Modifica quota' };
@@ -1788,6 +1809,21 @@ function renderAdminScreen(host){
   const dayRecurring = Object.entries(state.recurringBookings||{}).filter(([_,r])=>recurringActiveOnDate(r, state.selectedDate));
   const memberList = Object.entries(state.members||{}).sort((a,b)=>a[1].name.localeCompare(b[1].name));
 
+  // Statistiche cancellazioni last-minute (stesso giorno)
+  const cancelEntries = Object.values(state.cancellationStats||{});
+  const sameDayCancels = cancelEntries.filter(c=>c.sameDay);
+  const byMemberCancel = {};
+  sameDayCancels.forEach(c=>{
+    const name = c.forMemberName || 'Sconosciuto';
+    byMemberCancel[name] = (byMemberCancel[name]||0)+1;
+  });
+  const memberCancelStats = Object.entries(byMemberCancel).sort((a,b)=>b[1]-a[1]);
+  const byHourCancel = {};
+  sameDayCancels.forEach(c=>{
+    byHourCancel[c.hour] = (byHourCancel[c.hour]||0)+1;
+  });
+  const hourCancelStats = Object.entries(byHourCancel).sort((a,b)=>b[1]-a[1]);
+
   const screen = document.createElement('div');
   screen.className = 'screen';
   screen.innerHTML = `
@@ -1910,6 +1946,15 @@ function renderAdminScreen(host){
       <div class="hint" style="margin-bottom:8px;">Soci che hanno maturato almeno un'ora gratis non ancora segnata come riscattata.</div>
       <div id="premiList">${premiDaRiscattare.length ? '' : '<div class="hint">Nessun premio in sospeso.</div>'}</div>
     </div>
+
+    <div class="card">
+      <div class="section-title">Cancellazioni last-minute (stesso giorno)</div>
+      <div class="hint" style="margin-bottom:8px;">Ore di singolo/doppio cancellate nello stesso giorno in cui erano prenotate — tipicamente restano scoperte. Da sempre, non filtrabile per data.</div>
+      <div class="hint" style="margin-bottom:4px;"><b style="color:var(--chalk);">Per socio</b></div>
+      <div id="cancelByMember">${memberCancelStats.length ? '' : '<div class="hint">Nessuna cancellazione stesso giorno registrata.</div>'}</div>
+      <div class="hint" style="margin:10px 0 4px;"><b style="color:var(--chalk);">Per ora del giorno</b></div>
+      <div id="cancelByHour">${hourCancelStats.length ? '' : '<div class="hint">—</div>'}</div>
+    </div>
   `;
   host.replaceChildren(screen);
 
@@ -2025,6 +2070,19 @@ function renderAdminScreen(host){
     premiHost.appendChild(row);
   });
 
+  const cancelByMemberHost = screen.querySelector('#cancelByMember');
+  memberCancelStats.forEach(([name,count])=>{
+    const row = document.createElement('div'); row.className='list-row';
+    row.innerHTML = `<span>${name}</span><span class="pill" style="${count>=3?'color:var(--danger);border-color:var(--danger);':''}">${count} volt${count>1?'e':'a'}</span>`;
+    cancelByMemberHost.appendChild(row);
+  });
+  const cancelByHourHost = screen.querySelector('#cancelByHour');
+  hourCancelStats.forEach(([hour,count])=>{
+    const row = document.createElement('div'); row.className='list-row';
+    row.innerHTML = `<span>${String(hour).padStart(2,'0')}:00</span><span class="pill">${count} volt${count>1?'e':'a'}</span>`;
+    cancelByHourHost.appendChild(row);
+  });
+
   screen.querySelector('.period-strip').querySelectorAll('button').forEach(b=>{
     b.onclick = () => { state.adminPeriod = b.dataset.p; renderApp(); };
   });
@@ -2090,6 +2148,16 @@ function renderAdminScreen(host){
         forMemberName: b.memberName, courtId: b.courtId, courtName: court ? court.name : '',
         date: b.date, hour: b.hour, mode: b.mode
       });
+      if(b.mode==='normale' || b.mode==='doppio'){
+        const sameDay = (b.date === todayKey());
+        try{
+          const statRef = push(ref(db, cpath('cancellationStats')));
+          await set(statRef, {
+            forMemberName: b.memberName, memberId: b.memberId||null, date: b.date, hour: b.hour,
+            courtId: b.courtId, mode: b.mode, sameDay, timestamp: Date.now()
+          });
+        }catch(e){ console.error('cancellationStats', e); }
+      }
       offerWhatsAppFreedSlot(b.date, b.hour, court ? court.name : '');
     };
     row.appendChild(del);
