@@ -127,13 +127,18 @@ const CLUB_NAME = "Tennis Club Lello de Mita";
 const SUPER_ADMIN_EMAIL = "paoloveneruso@gmail.com";
 const CLUB_PATH = "lellodemita";
 const DEFAULT_COURTS = [ {id:'A', name:'Campo A'}, {id:'B', name:'Campo B'} ];
-const DEFAULT_RATES = { normale: 10, lezione: 25, doppio: 16 };
+const DEFAULT_RATES = { normale: 10, lezione: 25, doppio: 16, sat: 15, corsi: 10 };
 const MODES = [
   {id:'normale', label:'Ora di singolo'},
   {id:'lezione', label:'Lezione (maestro)'},
   {id:'doppio', label:'Ora doppio'},
 ];
-const modeLabel = id => (MODES.find(m=>m.id===id)||{}).label || id;
+const ADMIN_ONLY_MODES = [
+  {id:'sat', label:'SAT (scuola tennis)'},
+  {id:'corsi', label:'Corsi (altro maestro)'},
+];
+const ALL_MODES = [...MODES, ...ADMIN_ONLY_MODES];
+const modeLabel = id => (ALL_MODES.find(m=>m.id===id)||{}).label || id;
 
 const MIN_CANCEL_HOURS = 24;
 const MAX_ADVANCE_DAYS = 7;
@@ -336,6 +341,8 @@ const state = {
   bookingForGuestName: '',
   tab: 'campi',
   adminPeriod: 'oggi',
+  customFrom: todayKey(),
+  customTo: todayKey(),
   openCourseId: null,
   attendanceCourseId: null,
   attendanceDate: null,
@@ -1075,13 +1082,12 @@ function recurringActiveOnDate(r, dateStr){
   return true;
 }
 
-function countRecurringOccurrences(r, periodStartDate){
-  const today = new Date(); today.setHours(0,0,0,0);
+function countRecurringOccurrences(r, periodStartDate, periodEndDate){
   const seriesStart = new Date(r.startDate+'T00:00:00');
-  let start = seriesStart > periodStartDate ? seriesStart : periodStartDate;
+  let start = new Date(seriesStart > periodStartDate ? seriesStart : periodStartDate);
   start.setHours(0,0,0,0);
-  let end = today;
-  if(r.endDate){ const e = new Date(r.endDate+'T00:00:00'); if(e<end) end = e; }
+  let end = new Date(periodEndDate);
+  if(r.endDate){ const e = new Date(r.endDate+'T23:59:59'); if(e<end) end = e; }
   if(start>end) return 0;
   let d = new Date(start);
   let guard = 0;
@@ -1727,16 +1733,28 @@ function renderAdminScreen(host){
     });
   });
 
-  const periodStart = {
-    oggi: new Date(now.getFullYear(),now.getMonth(),now.getDate()),
-    settimana: new Date(now.getTime()-7*24*3600*1000),
-    tutto: new Date(0),
-  }[state.adminPeriod];
+  let periodStart, periodEnd;
+  if(state.adminPeriod==='oggi'){
+    periodStart = new Date(now.getFullYear(),now.getMonth(),now.getDate());
+    periodEnd = new Date(now.getFullYear(),now.getMonth(),now.getDate(),23,59,59);
+  } else if(state.adminPeriod==='settimana'){
+    periodStart = new Date(now.getTime()-7*24*3600*1000);
+    periodEnd = now;
+  } else if(state.adminPeriod==='custom'){
+    periodStart = new Date((state.customFrom||todayKey())+'T00:00:00');
+    periodEnd = new Date((state.customTo||todayKey())+'T23:59:59');
+  } else {
+    periodStart = new Date(0);
+    periodEnd = now;
+  }
 
   const allPrivate = Object.entries(state.bookingsPrivate||{});
-  const inPeriod = allPrivate.filter(([_,b])=> slotDateTime(b.date,b.hour) >= periodStart);
+  const inPeriod = allPrivate.filter(([_,b])=> {
+    const t = slotDateTime(b.date,b.hour);
+    return t >= periodStart && t <= periodEnd;
+  });
   let totHours = inPeriod.length;
-  const byMode = {}; MODES.forEach(m=> byMode[m.id] = {hours:0, revenue:0});
+  const byMode = {}; ALL_MODES.forEach(m=> byMode[m.id] = {hours:0, revenue:0});
   let totRevenue = 0;
   inPeriod.forEach(([_,b])=>{
     const mode = b.mode || 'normale';
@@ -1746,7 +1764,7 @@ function renderAdminScreen(host){
     byMode[mode].revenue += r; totRevenue += r;
   });
   Object.values(state.recurringBookings||{}).forEach(r=>{
-    const occ = countRecurringOccurrences(r, periodStart);
+    const occ = countRecurringOccurrences(r, periodStart, periodEnd);
     if(occ<=0) return;
     totHours += occ;
     const mode = r.mode || 'normale';
@@ -1775,8 +1793,15 @@ function renderAdminScreen(host){
       <div class="period-strip">
         <button data-p="oggi" class="${state.adminPeriod==='oggi'?'sel':''}">Oggi</button>
         <button data-p="settimana" class="${state.adminPeriod==='settimana'?'sel':''}">7 giorni</button>
-        <button data-p="tutto" class="${state.adminPeriod==='tutto'?'sel':''}">Da sempre</button>
+        <button data-p="custom" class="${state.adminPeriod==='custom'?'sel':''}">Personalizzato</button>
       </div>
+      ${state.adminPeriod==='custom' ? `
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <div class="field"><label>Da</label><input id="customFromInput" type="date" value="${state.customFrom}"></div>
+        <div class="field"><label>A</label><input id="customToInput" type="date" value="${state.customTo}"></div>
+      </div>
+      <div class="hint" style="margin-top:4px;">${fmtDateDisplay(state.customFrom)} → ${fmtDateDisplay(state.customTo)}</div>
+      ` : ''}
       <div id="modeBreakdown" style="margin-top:10px;"></div>
       <div class="totale-box"><span class="l">Ore totali</span><span class="v">${totHours}h</span></div>
       <div class="totale-box"><span class="l">Incasso stimato</span><span class="v">€ ${totRevenue.toFixed(2)}</span></div>
@@ -1826,7 +1851,7 @@ function renderAdminScreen(host){
         <select id="recHour">${Array.from({length:CLOSE_HOUR-OPEN_HOUR},(_,i)=>{const h=OPEN_HOUR+i;return `<option value="${h}">${String(h).padStart(2,'0')}:00</option>`;}).join('')}</select>
       </div>
       <div class="field"><label>Modalità</label>
-        <select id="recMode">${MODES.map(m=>`<option value="${m.id}">${m.label} (€ ${state.club.rates[m.id]}/h)</option>`).join('')}</select>
+        <select id="recMode">${ALL_MODES.map(m=>`<option value="${m.id}">${m.label} (€ ${state.club.rates[m.id]}/h)</option>`).join('')}</select>
       </div>
       <div class="field"><label>Data inizio</label><input id="recStart" type="date" value="${todayKey()}"></div>
       <div class="field"><label>Data fine (opzionale)</label><input id="recEnd" type="date"></div>
@@ -2000,24 +2025,34 @@ function renderAdminScreen(host){
   screen.querySelector('.period-strip').querySelectorAll('button').forEach(b=>{
     b.onclick = () => { state.adminPeriod = b.dataset.p; renderApp(); };
   });
+  const customFromInput = screen.querySelector('#customFromInput');
+  const customToInput = screen.querySelector('#customToInput');
+  if(customFromInput) customFromInput.onchange = (e)=>{ state.customFrom = e.target.value; renderApp(); };
+  if(customToInput) customToInput.onchange = (e)=>{ state.customTo = e.target.value; renderApp(); };
 
   const modeBreakdown = screen.querySelector('#modeBreakdown');
-  MODES.forEach(m=>{
-    const d = byMode[m.id] || {hours:0,revenue:0};
+  const oreSoci = { hours: (byMode.normale?.hours||0)+(byMode.doppio?.hours||0), revenue: (byMode.normale?.revenue||0)+(byMode.doppio?.revenue||0) };
+  const contabilitaLines = [
+    { label:'Ore soci (singolo + doppio)', d: oreSoci },
+    { label:'Lezioni maestro', d: byMode.lezione||{hours:0,revenue:0} },
+    { label:'SAT (scuola tennis)', d: byMode.sat||{hours:0,revenue:0} },
+    { label:'Corsi (altro maestro)', d: byMode.corsi||{hours:0,revenue:0} },
+  ];
+  contabilitaLines.forEach(line=>{
     const row = document.createElement('div'); row.className='list-row';
-    row.innerHTML = `<span>${m.label}</span><span class="pill">${d.hours}h · € ${d.revenue.toFixed(2)}</span>`;
+    row.innerHTML = `<span>${line.label}</span><span class="pill">${line.d.hours}h · € ${line.d.revenue.toFixed(2)}</span>`;
     modeBreakdown.appendChild(row);
   });
 
   const ratesHost = screen.querySelector('#ratesHost');
-  MODES.forEach(m=>{
+  ALL_MODES.forEach(m=>{
     const row = document.createElement('div'); row.className='field'; row.style.marginBottom='8px';
-    row.innerHTML = `<label>${m.label}</label><input type="number" min="0" step="0.5" id="rate_${m.id}" value="${state.club.rates[m.id]}">`;
+    row.innerHTML = `<label>${m.label}${ADMIN_ONLY_MODES.some(am=>am.id===m.id)?' (solo admin)':''}</label><input type="number" min="0" step="0.5" id="rate_${m.id}" value="${state.club.rates[m.id]}">`;
     ratesHost.appendChild(row);
   });
   screen.querySelector('#saveRatesBtn').onclick = async () => {
     const newRates = {};
-    MODES.forEach(m=>{ newRates[m.id] = parseFloat(screen.querySelector('#rate_'+m.id).value) || 0; });
+    ALL_MODES.forEach(m=>{ newRates[m.id] = parseFloat(screen.querySelector('#rate_'+m.id).value) || 0; });
     try{ await update(ref(db, cpath('info/rates')), newRates); toast('Tariffe aggiornate'); }
     catch(e){ toast('Errore: '+e.message); }
   };
