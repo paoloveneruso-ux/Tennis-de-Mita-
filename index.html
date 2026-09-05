@@ -1636,13 +1636,16 @@ function renderSuperAdminScreen(host){
   screen.querySelector('#auditFilter').onchange = (e)=>{ state.auditFilterAdmin = e.target.value; renderApp(); };
 
   const listHost = screen.querySelector('#auditList');
+  const typeLabels = { cancellazione:'Cancellazione', prenotazione:'Prenotazione', modifica_quota:'Modifica quota' };
+  const typeColors = { cancellazione:'var(--danger)', modifica_quota:'var(--clay)' };
   filtered.forEach(([id,e])=>{
     const d = new Date(e.timestamp);
     const when = d.toLocaleDateString('it-IT')+' '+d.toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'});
     const row = document.createElement('div'); row.className='list-row';
+    const rateDetail = e.type==='modifica_quota' ? ` · € ${(e.oldRate||0).toFixed(2)} → € ${(e.newRate||0).toFixed(2)}` : '';
     row.innerHTML = `<span>
-      <b style="color:${e.type==='cancellazione'?'var(--danger)':'var(--ball)'};">${e.type==='cancellazione'?'Cancellazione':'Prenotazione'}</b> di <b>${e.byName}</b><br>
-      <span class="hint">${when} · per ${e.forMemberName||'—'} · ${e.courtName||''} ${e.date?fmtDateDisplay(e.date):''} ${e.hour!==undefined?String(e.hour).padStart(2,'0')+':00':''} · ${modeLabel(e.mode)}</span>
+      <b style="color:${typeColors[e.type]||'var(--ball)'};">${typeLabels[e.type]||e.type}</b> di <b>${e.byName}</b><br>
+      <span class="hint">${when} · per ${e.forMemberName||'—'} · ${e.courtName||''} ${e.date?fmtDateDisplay(e.date):''} ${e.hour!==undefined?String(e.hour).padStart(2,'0')+':00':''} · ${modeLabel(e.mode)}${rateDetail}</span>
     </span>`;
     listHost.appendChild(row);
   });
@@ -2061,7 +2064,26 @@ function renderAdminScreen(host){
   dayBookings.forEach(([bid,b])=>{
     const court = (state.club.courts||[]).find(c=>c.id===b.courtId);
     const row = document.createElement('div'); row.className='list-row';
-    row.innerHTML = `<span>${String(b.hour).padStart(2,'0')}:00 · ${court?court.name:''} · ${b.memberName} · ${modeLabel(b.mode)}${b.teacherName?' · maestro: '+b.teacherName:''}</span>`;
+    const currentRate = (typeof b.rate==='number') ? b.rate : (state.club.rates[b.mode]||0);
+    row.innerHTML = `<span>${String(b.hour).padStart(2,'0')}:00 · ${court?court.name:''} · ${b.memberName} · ${modeLabel(b.mode)}${b.teacherName?' · maestro: '+b.teacherName:''} · € ${currentRate.toFixed(2)}</span>`;
+    if(b.mode==='normale' || b.mode==='doppio'){
+      const editPrice = document.createElement('button'); editPrice.className='small-btn'; editPrice.textContent='Modifica quota';
+      editPrice.onclick = async () => {
+        const input = prompt('Nuova quota per questa ora (€):', currentRate);
+        if(input===null) return;
+        const newRate = parseFloat(input.replace(',','.'));
+        if(isNaN(newRate) || newRate<0){ toast('Importo non valido'); return; }
+        try{
+          await update(ref(db, cpath('bookingsPrivate/'+bid)), { rate: newRate });
+          writeAuditLog({
+            type:'modifica_quota', forMemberName: b.memberName, courtId: b.courtId, courtName: court?court.name:'',
+            date: b.date, hour: b.hour, mode: b.mode, oldRate: currentRate, newRate
+          });
+          toast('Quota aggiornata: € '+newRate.toFixed(2));
+        }catch(e){ toast('Errore: '+e.message); }
+      };
+      row.appendChild(editPrice);
+    }
     const del = document.createElement('button'); del.className='small-btn'; del.textContent='Annulla';
     del.onclick = async () => {
       await cancelBooking(bid, b.uid, b.teacherUid, {
