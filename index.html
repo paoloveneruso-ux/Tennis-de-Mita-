@@ -105,7 +105,7 @@
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, fetchSignInMethodsForEmail, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { getDatabase, ref, set, get, update, remove, onValue, push } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 /* ================= Firebase config ================= */
@@ -387,7 +387,8 @@ function renderProfileModal(){
 const state = {
   uid: null,
   authChecked: false,
-  authMode: 'login',
+  authStep: 'email',
+  authEmail: '',
   club: null,
   admins: {},
   isAdmin: false,
@@ -503,37 +504,75 @@ async function ensureBootstrap(){
 
 /* ================= Login / Registrazione ================= */
 function renderAuthScreen(){
-  const isRegister = state.authMode === 'register';
+  const step = state.authStep || 'email';
+
+  if(step === 'email'){
+    root.innerHTML = `
+      <div class="court-header">
+        <div class="eyebrow">${CLUB_NAME}</div>
+        <h1>Accedi</h1>
+        <div class="court-line"></div>
+      </div>
+      <div class="screen">
+        <div class="hint">Inserisci la tua email: capiamo noi se hai già un account o se ne dobbiamo creare uno nuovo — così eviti di crearne per sbaglio uno doppio.</div>
+        <div class="card" style="display:flex;flex-direction:column;gap:12px;">
+          <div class="field"><label>Email</label><input id="authEmail" type="email" placeholder="tuaemail@esempio.it" autocomplete="email"></div>
+          <div id="authErr"></div>
+          <button class="btn-primary" id="authContinue">Continua</button>
+        </div>
+      </div>`;
+    const goContinue = async () => {
+      const email = document.getElementById('authEmail').value.trim();
+      const errBox = document.getElementById('authErr');
+      errBox.innerHTML = '';
+      if(!email){ errBox.innerHTML = `<div class="error-box">Inserisci la tua email.</div>`; return; }
+      try{
+        const methods = await fetchSignInMethodsForEmail(auth, email);
+        state.authEmail = email;
+        state.authStep = methods.length ? 'login' : 'register';
+        renderAuthScreen();
+      }catch(e){
+        errBox.innerHTML = `<div class="error-box">${translateAuthError(e)}</div>`;
+      }
+    };
+    document.getElementById('authContinue').onclick = goContinue;
+    document.getElementById('authEmail').onkeydown = (e)=>{ if(e.key==='Enter') goContinue(); };
+    document.getElementById('authEmail').focus();
+    return;
+  }
+
+  const isRegister = step === 'register';
   root.innerHTML = `
     <div class="court-header">
       <div class="eyebrow">${CLUB_NAME}</div>
-      <h1>${isRegister ? 'Registrati' : 'Accedi'}</h1>
+      <h1>${isRegister ? 'Crea account' : 'Accedi'}</h1>
       <div class="court-line"></div>
     </div>
     <div class="screen">
+      <div class="hint">${isRegister ? 'Non risulta un account con questa email: creane uno nuovo.' : 'Bentornato! Inserisci la password per continuare.'}</div>
       <div class="card" style="display:flex;flex-direction:column;gap:12px;">
+        <div class="field"><label>Email</label><input value="${state.authEmail}" disabled style="opacity:.6;"></div>
         ${isRegister ? `<div class="field"><label>Nome e cognome</label><input id="authName" placeholder="Nome e cognome"></div>` : ''}
         ${isRegister ? `<div class="field"><label>Cellulare (opzionale, per solleciti WhatsApp)</label><input id="authPhone" type="tel" placeholder="Es. 333 1234567"></div>` : ''}
-        <div class="field"><label>Email</label><input id="authEmail" type="email" placeholder="tuaemail@esempio.it"></div>
-        <div class="field"><label>Password</label><input id="authPass" type="password" placeholder="${isRegister?'Almeno 6 caratteri':'••••••••'}"></div>
+        <div class="field"><label>Password</label><input id="authPass" type="password" placeholder="${isRegister?'Almeno 6 caratteri':'••••••••'}" autocomplete="${isRegister?'new-password':'current-password'}"></div>
         <div id="authErr"></div>
         <button class="btn-primary" id="authSubmit">${isRegister ? 'Crea account' : 'Accedi'}</button>
         ${!isRegister ? `<button class="link" id="forgotBtn" style="align-self:center;">Password dimenticata?</button>` : ''}
       </div>
-      <button class="link" id="toggleAuthMode" style="align-self:center;">${isRegister ? 'Hai già un account? Accedi' : 'Non hai un account? Registrati'}</button>
+      <button class="link" id="backToEmail" style="align-self:center;">Non è la tua email? Torna indietro</button>
     </div>`;
 
-  document.getElementById('toggleAuthMode').onclick = () => {
-    state.authMode = isRegister ? 'login' : 'register';
+  document.getElementById('backToEmail').onclick = () => {
+    state.authStep = 'email';
     renderAuthScreen();
   };
 
   document.getElementById('authSubmit').onclick = async () => {
-    const email = document.getElementById('authEmail').value.trim();
+    const email = state.authEmail;
     const pass = document.getElementById('authPass').value;
     const errBox = document.getElementById('authErr');
     errBox.innerHTML = '';
-    if(!email || !pass){ errBox.innerHTML = `<div class="error-box">Inserisci email e password.</div>`; return; }
+    if(!pass){ errBox.innerHTML = `<div class="error-box">Inserisci la password.</div>`; return; }
     try{
       if(isRegister){
         const name = document.getElementById('authName').value.trim();
@@ -551,9 +590,7 @@ function renderAuthScreen(){
 
   const forgotBtn = document.getElementById('forgotBtn');
   if(forgotBtn) forgotBtn.onclick = async () => {
-    const email = document.getElementById('authEmail').value.trim();
-    if(!email){ toast('Inserisci prima la tua email'); return; }
-    try{ await sendPasswordResetEmail(auth, email); toast('Email di recupero inviata'); }
+    try{ await sendPasswordResetEmail(auth, state.authEmail); toast('Email di recupero inviata'); }
     catch(e){ toast(translateAuthError(e)); }
   };
 }
@@ -1807,46 +1844,63 @@ function renderMemberDetailModal(m){
   loadMembershipFeeForMember(m.uid);
   loadLoyaltyForMember(m.uid);
   document.querySelectorAll('.modal-overlay').forEach(el=>el.remove());
+  const curYear = new Date().getFullYear();
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
     <div class="modal">
       <h4>${m.name}</h4>
-      <div id="memberFeeHost"></div>
+      <div id="memberFeeStatus"></div>
+      <div class="field" style="margin-top:8px;"><label>Importo (€)</label><input id="memberFeeAmount" type="number" min="0" step="1"></div>
+      <button class="btn-primary" id="memberFeeSaveBtn" style="width:100%;margin-top:6px;">Segna pagata</button>
       <div class="section-title" style="margin-top:8px;">Raccolta punti</div>
-      <div id="memberLoyaltyHost"></div>
+      <div id="memberLoyaltyHost"><div class="hint">Caricamento…</div></div>
       <button class="btn-ghost" id="closeMemberDetail">Chiudi</button>
     </div>`;
   document.body.appendChild(overlay);
   overlay.querySelector('#closeMemberDetail').onclick = () => overlay.remove();
 
-  function paint(){
-    if(!document.body.contains(overlay)) return;
-    const curYear = new Date().getFullYear();
-    const scan = state.adminMembershipFees[m.uid] || {};
-    const fee = scan[curYear];
-    const feeHost = overlay.querySelector('#memberFeeHost');
-    feeHost.innerHTML = `
-      <div class="list-row"><span>Quota sociale ${curYear}</span><span class="pill" style="${fee?.paidAt?'':'color:var(--danger);border-color:var(--danger);'}">${fee?.paidAt ? 'Pagata · € '+fee.amount.toFixed(2) : 'Da pagare'}</span></div>
-      <div class="field" style="margin-top:8px;"><label>Importo (€)</label><input id="memberFeeAmount" type="number" min="0" step="1" value="${fee?.amount ?? ''}"></div>
-      <button class="btn-primary" id="memberFeeSaveBtn" style="width:100%;margin-top:6px;">Segna pagata</button>
-    `;
-    feeHost.querySelector('#memberFeeSaveBtn').onclick = async () => {
-      const amount = parseFloat(feeHost.querySelector('#memberFeeAmount').value);
-      if(isNaN(amount) || amount<0){ toast('Inserisci un importo valido'); return; }
-      try{
-        await update(ref(db, cpath('membershipFees/'+m.uid+'/'+curYear)), { amount, paidAt: Date.now() });
-        toast('Quota segnata come pagata');
-      }catch(e){ toast('Errore: '+e.message); }
-    };
+  const amountInput = overlay.querySelector('#memberFeeAmount');
+  const statusHost = overlay.querySelector('#memberFeeStatus');
+  let amountPrefilled = false;
 
-    const loyaltyScan = state.adminLoyaltyScan[m.uid] || {};
-    const progress = computeLoyaltyProgress(loyaltyScan.confirmed, loyaltyScan.redemptions);
-    overlay.querySelector('#memberLoyaltyHost').innerHTML = progress.map(loyaltyBarHtml).join('');
+  overlay.querySelector('#memberFeeSaveBtn').onclick = async () => {
+    const amount = parseFloat(amountInput.value);
+    if(isNaN(amount) || amount<0){ toast('Inserisci un importo valido'); return; }
+    try{
+      await update(ref(db, cpath('membershipFees/'+m.uid+'/'+curYear)), { amount, paidAt: Date.now() });
+      toast('Quota segnata come pagata');
+    }catch(e){ toast('Errore: '+e.message); }
+  };
+
+  // Aggiorna solo le parti in sola lettura: non tocca mai l'input mentre l'admin ci scrive dentro
+  function refreshReadOnly(){
+    if(!document.body.contains(overlay)) return false;
+    const scan = state.adminMembershipFees[m.uid];
+    if(scan !== undefined){
+      const fee = scan[curYear];
+      statusHost.innerHTML = `<div class="list-row"><span>Quota sociale ${curYear}</span><span class="pill" style="${fee?.paidAt?'':'color:var(--danger);border-color:var(--danger);'}">${fee?.paidAt ? 'Pagata · € '+fee.amount.toFixed(2) : 'Da pagare'}</span></div>`;
+      if(!amountPrefilled && fee?.amount!==undefined){
+        amountInput.value = fee.amount;
+        amountPrefilled = true;
+      }
+    }
+    const loyaltyScan = state.adminLoyaltyScan[m.uid];
+    if(loyaltyScan && loyaltyScan.confirmed!==undefined && loyaltyScan.redemptions!==undefined){
+      const progress = computeLoyaltyProgress(loyaltyScan.confirmed, loyaltyScan.redemptions);
+      overlay.querySelector('#memberLoyaltyHost').innerHTML = progress.map(loyaltyBarHtml).join('');
+    }
+    return scan!==undefined && loyaltyScan && loyaltyScan.confirmed!==undefined && loyaltyScan.redemptions!==undefined;
   }
-  paint();
-  // Ridisegna quando arrivano i dati (i loader sono asincroni)
-  const interval = setInterval(()=>{ if(!document.body.contains(overlay)){ clearInterval(interval); return; } paint(); }, 500);
+
+  if(!refreshReadOnly()){
+    let ticks = 0;
+    const interval = setInterval(()=>{
+      ticks++;
+      const stillOpen = document.body.contains(overlay);
+      if(!stillOpen || refreshReadOnly() || ticks>20) clearInterval(interval);
+    }, 400);
+  }
 }
 
 /* ================= Admin ================= */
