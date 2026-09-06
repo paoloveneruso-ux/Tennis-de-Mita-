@@ -98,6 +98,31 @@
   .copy-code{font-family:var(--font-mono);font-size:26px;letter-spacing:.12em;text-align:center;background:var(--board);border:1px dashed var(--clay);border-radius:8px;padding:14px;color:var(--ball);}
   .btn-row{display:flex;gap:10px;}
   .btn-row button{flex:1;}
+
+  /* ================= Adattamento tablet / desktop ================= */
+  @media (min-width: 640px){
+    body{ background-image:
+        radial-gradient(circle at 15% 0%, rgba(215,232,92,0.05), transparent 45%),
+        repeating-linear-gradient(0deg, rgba(255,255,255,0.015) 0px, rgba(255,255,255,0.015) 1px, transparent 1px, transparent 3px),
+        var(--board);
+    }
+    #app{ max-width:640px; min-height:100vh; box-shadow:0 0 60px rgba(0,0,0,.4); border-left:1px solid var(--line); border-right:1px solid var(--line); }
+    .modal-overlay{ align-items:center; padding:20px; }
+    .modal{ border-radius:16px; max-width:480px; box-shadow:0 20px 60px rgba(0,0,0,.6); }
+  }
+  @media (min-width: 900px){
+    #app{ max-width:880px; }
+    .screen{ display:grid; grid-template-columns:1fr 1fr; align-items:start; gap:16px; }
+    .screen > .card, .screen > #courseCards, .screen > #myAccountHost, .screen > #courtsHost, .screen > #loyaltyHost,
+    .screen > #daysHost, .screen > .today-tally, .screen > .day-strip{ grid-column: 1 / -1; }
+    .slot-row{ grid-template-columns:repeat(auto-fill,minmax(76px,1fr)); }
+  }
+  @media (min-width: 1200px){
+    #app{ max-width:1080px; }
+  }
+  @media (min-width: 900px) and (orientation: landscape){
+    .tabbar{ position:sticky; bottom:0; }
+  }
 </style>
 </head>
 <body>
