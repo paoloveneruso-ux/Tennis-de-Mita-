@@ -443,6 +443,7 @@ const state = {
   bookingForGuestName: '',
   tab: 'campi',
   adminPeriod: 'oggi',
+  historyDate: addDays(todayKey(), -1),
   customFrom: todayKey(),
   customTo: todayKey(),
   openCourseId: null,
@@ -812,7 +813,7 @@ function renderApp(){
       <button data-tab="corsi" class="${activeTab==='corsi'?'active':''}">Corsi</button>
       ${state.isTeacher ? `<button data-tab="maestro" class="${activeTab==='maestro'?'active':''}">Maestro</button>` : ''}
       <button data-tab="soci" class="${activeTab==='soci'?'active':''}">Soci</button>
-      <button data-tab="admin" class="${activeTab==='admin'?'active':''}">Admin</button>
+      ${state.isAdmin ? `<button data-tab="admin" class="${activeTab==='admin'?'active':''}">Admin</button>` : ''}
       ${state.isSuperAdmin ? `<button data-tab="registro" class="${activeTab==='registro'?'active':''}">Registro</button>` : ''}
     </div>`;
   root.querySelectorAll('.tabbar button').forEach(b=>{ b.onclick = () => { state.tab = b.dataset.tab; renderApp(); }; });
@@ -823,6 +824,7 @@ function renderApp(){
   if(activeTab==='campi') renderCourts(host);
   else if(activeTab==='corsi') renderCorsiScreen(host);
   else if(activeTab==='maestro' && state.isTeacher) renderMaestroScreen(host);
+  else if(activeTab==='admin' && !state.isAdmin) renderCourts(host);
   else if(activeTab==='registro' && state.isSuperAdmin) renderSuperAdminScreen(host);
   else if(activeTab==='soci') renderMembersScreen(host);
   else renderAdminScreen(host);
@@ -1174,6 +1176,7 @@ function openTeacherPickerAndBook(court, hour, label, target){
           ${available.map(([id,m])=>`<option value="${m.uid}">${m.name}</option>`).join('')}
         </select>
       </div>
+      <div class="hint" style="color:var(--clay);border:1px solid var(--clay-dim);border-radius:8px;padding:8px;">Ricorda: prima di confermare, contatta privatamente il maestro per assicurarti che sia davvero disponibile in questo orario. La prenotazione qui non lo avvisa automaticamente.</div>
       <div class="hint">Non sarà annullabile nelle 24 ore precedenti l'orario.</div>
       <div class="btn-row">
         <button class="btn-ghost" id="cancelPick">Annulla</button>
@@ -1241,10 +1244,13 @@ function countRecurringOccurrences(r, periodStartDate, periodEndDate){
 
 /* ================= Vista Corsi ================= */
 function renderCorsiScreen(host){
-  const courseList = Object.entries(state.courses||{}).sort((a,b)=>{
-    const sa = getCourseSessions(a[1])[0]||{weekday:0,hour:0}, sb = getCourseSessions(b[1])[0]||{weekday:0,hour:0};
-    return (sa.weekday-sb.weekday) || (sa.hour-sb.hour);
-  });
+  const canSeeAllCourses = state.isAdmin || state.isTeacher;
+  const courseList = Object.entries(state.courses||{})
+    .filter(([cid])=> canSeeAllCourses || state.myEnrollments[cid])
+    .sort((a,b)=>{
+      const sa = getCourseSessions(a[1])[0]||{weekday:0,hour:0}, sb = getCourseSessions(b[1])[0]||{weekday:0,hour:0};
+      return (sa.weekday-sb.weekday) || (sa.hour-sb.hour);
+    });
   const allLinkedMembers = Object.entries(state.members||{}).filter(([_,m])=>m.uid);
   if(!state.draftSessions[0].courtId && state.club.courts && state.club.courts[0]) state.draftSessions[0].courtId = state.club.courts[0].id;
 
@@ -2009,6 +2015,10 @@ function renderAdminScreen(host){
     byTeacherToday[b.teacherName].revenue += (typeof b.rate==='number'?b.rate:(state.club.rates.lezione||0));
   });
   const dayRecurring = Object.entries(state.recurringBookings||{}).filter(([_,r])=>recurringActiveOnDate(r, state.selectedDate));
+
+  // Cronologia: prenotazioni di un giorno passato, sola lettura
+  const historyBookings = allPrivate.filter(([_,b])=>b.date===state.historyDate).sort((a,b)=>a[1].hour-b[1].hour);
+  const historyRecurring = Object.entries(state.recurringBookings||{}).filter(([_,r])=>recurringActiveOnDate(r, state.historyDate)).sort((a,b)=>a[1].hour-b[1].hour);
   const memberList = Object.entries(state.members||{}).sort((a,b)=>a[1].name.localeCompare(b[1].name));
 
   // Statistiche cancellazioni last-minute (stesso giorno)
@@ -2067,6 +2077,14 @@ function renderAdminScreen(host){
       <div class="section-title">Prenotazioni del ${fmtDateDisplay(state.selectedDate)} (${dayBookings.length + dayRecurring.length})</div>
       ${Object.keys(byTeacherToday).length ? `<div class="hint" style="margin-bottom:6px;">Incasso lezioni per maestro:</div>${Object.entries(byTeacherToday).map(([name,d])=>`<div class="list-row"><span>${name}</span><span class="pill">${d.hours}h · € ${d.revenue.toFixed(2)}</span></div>`).join('')}` : ''}
       <div id="bookingsHost">${(dayBookings.length||dayRecurring.length) ? '' : '<div class="hint">Nessuna prenotazione.</div>'}</div>
+    </div>
+
+    <div class="card">
+      <div class="section-title">Cronologia prenotazioni</div>
+      <div class="hint" style="margin-bottom:8px;">Consulta un giorno passato — sola lettura, nessuna modifica o cancellazione da qui.</div>
+      <div class="field"><label>Giorno</label><input id="historyDateInput" type="date" value="${state.historyDate}" max="${todayKey()}"></div>
+      <div class="hint" style="margin:6px 0;">${fmtDateDisplay(state.historyDate)} · ${historyBookings.length + historyRecurring.length} ore</div>
+      <div id="historyList">${(historyBookings.length||historyRecurring.length) ? '' : '<div class="hint">Nessuna prenotazione in questo giorno.</div>'}</div>
     </div>
 
     <div class="card">
@@ -2321,6 +2339,22 @@ function renderAdminScreen(host){
   const customToInput = screen.querySelector('#customToInput');
   if(customFromInput) customFromInput.onchange = (e)=>{ state.customFrom = e.target.value; renderApp(); };
   if(customToInput) customToInput.onchange = (e)=>{ state.customTo = e.target.value; renderApp(); };
+
+  screen.querySelector('#historyDateInput').onchange = (e)=>{ state.historyDate = e.target.value; renderApp(); };
+  const historyHost = screen.querySelector('#historyList');
+  historyBookings.forEach(([bid,b])=>{
+    const court = (state.club.courts||[]).find(c=>c.id===b.courtId);
+    const rate = (typeof b.rate==='number') ? b.rate : (state.club.rates[b.mode]||0);
+    const row = document.createElement('div'); row.className='list-row';
+    row.innerHTML = `<span>${String(b.hour).padStart(2,'0')}:00 · ${court?court.name:''} · ${b.memberName} · ${modeLabel(b.mode)}${b.teacherName?' · maestro: '+b.teacherName:''} · € ${rate.toFixed(2)}</span>`;
+    historyHost.appendChild(row);
+  });
+  historyRecurring.forEach(([_,r])=>{
+    const court = (state.club.courts||[]).find(c=>c.id===r.courtId);
+    const row = document.createElement('div'); row.className='list-row';
+    row.innerHTML = `<span>${String(r.hour).padStart(2,'0')}:00 · ${court?court.name:''} · ${r.memberName} · ${modeLabel(r.mode)} <span class="pill" style="padding:2px 7px;">fisso</span></span>`;
+    historyHost.appendChild(row);
+  });
 
   const modeBreakdown = screen.querySelector('#modeBreakdown');
   const oreSoci = { hours: (byMode.normale?.hours||0)+(byMode.doppio?.hours||0), revenue: (byMode.normale?.revenue||0)+(byMode.doppio?.revenue||0) };
