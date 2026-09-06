@@ -130,7 +130,7 @@
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, fetchSignInMethodsForEmail, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { getDatabase, ref, set, get, update, remove, onValue, push } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 /* ================= Firebase config ================= */
@@ -529,44 +529,7 @@ async function ensureBootstrap(){
 
 /* ================= Login / Registrazione ================= */
 function renderAuthScreen(){
-  const step = state.authStep || 'email';
-
-  if(step === 'email'){
-    root.innerHTML = `
-      <div class="court-header">
-        <div class="eyebrow">${CLUB_NAME}</div>
-        <h1>Accedi</h1>
-        <div class="court-line"></div>
-      </div>
-      <div class="screen">
-        <div class="hint">Inserisci la tua email: capiamo noi se hai già un account o se ne dobbiamo creare uno nuovo — così eviti di crearne per sbaglio uno doppio.</div>
-        <div class="card" style="display:flex;flex-direction:column;gap:12px;">
-          <div class="field"><label>Email</label><input id="authEmail" type="email" placeholder="tuaemail@esempio.it" autocomplete="email"></div>
-          <div id="authErr"></div>
-          <button class="btn-primary" id="authContinue">Continua</button>
-        </div>
-      </div>`;
-    const goContinue = async () => {
-      const email = document.getElementById('authEmail').value.trim();
-      const errBox = document.getElementById('authErr');
-      errBox.innerHTML = '';
-      if(!email){ errBox.innerHTML = `<div class="error-box">Inserisci la tua email.</div>`; return; }
-      try{
-        const methods = await fetchSignInMethodsForEmail(auth, email);
-        state.authEmail = email;
-        state.authStep = methods.length ? 'login' : 'register';
-        renderAuthScreen();
-      }catch(e){
-        errBox.innerHTML = `<div class="error-box">${translateAuthError(e)}</div>`;
-      }
-    };
-    document.getElementById('authContinue').onclick = goContinue;
-    document.getElementById('authEmail').onkeydown = (e)=>{ if(e.key==='Enter') goContinue(); };
-    document.getElementById('authEmail').focus();
-    return;
-  }
-
-  const isRegister = step === 'register';
+  const isRegister = (state.authStep || 'login') === 'register';
   root.innerHTML = `
     <div class="court-header">
       <div class="eyebrow">${CLUB_NAME}</div>
@@ -574,9 +537,8 @@ function renderAuthScreen(){
       <div class="court-line"></div>
     </div>
     <div class="screen">
-      <div class="hint">${isRegister ? 'Non risulta un account con questa email: creane uno nuovo.' : 'Bentornato! Inserisci la password per continuare.'}</div>
       <div class="card" style="display:flex;flex-direction:column;gap:12px;">
-        <div class="field"><label>Email</label><input value="${state.authEmail}" disabled style="opacity:.6;"></div>
+        <div class="field"><label>Email</label><input id="authEmail" type="email" placeholder="tuaemail@esempio.it" autocomplete="email" value="${state.authEmail||''}"></div>
         ${isRegister ? `<div class="field"><label>Nome e cognome</label><input id="authName" placeholder="Nome e cognome"></div>` : ''}
         ${isRegister ? `<div class="field"><label>Cellulare (opzionale, per solleciti WhatsApp)</label><input id="authPhone" type="tel" placeholder="Es. 333 1234567"></div>` : ''}
         <div class="field"><label>Password</label><input id="authPass" type="password" placeholder="${isRegister?'Almeno 6 caratteri':'••••••••'}" autocomplete="${isRegister?'new-password':'current-password'}"></div>
@@ -584,20 +546,22 @@ function renderAuthScreen(){
         <button class="btn-primary" id="authSubmit">${isRegister ? 'Crea account' : 'Accedi'}</button>
         ${!isRegister ? `<button class="link" id="forgotBtn" style="align-self:center;">Password dimenticata?</button>` : ''}
       </div>
-      <button class="link" id="backToEmail" style="align-self:center;">Non è la tua email? Torna indietro</button>
+      <button class="link" id="toggleAuthMode" style="align-self:center;">${isRegister ? 'Hai già un account? Accedi' : 'Non hai un account? Registrati'}</button>
     </div>`;
 
-  document.getElementById('backToEmail').onclick = () => {
-    state.authStep = 'email';
+  document.getElementById('toggleAuthMode').onclick = () => {
+    state.authEmail = document.getElementById('authEmail').value.trim();
+    state.authStep = isRegister ? 'login' : 'register';
     renderAuthScreen();
   };
 
   document.getElementById('authSubmit').onclick = async () => {
-    const email = state.authEmail;
+    const email = document.getElementById('authEmail').value.trim();
     const pass = document.getElementById('authPass').value;
     const errBox = document.getElementById('authErr');
     errBox.innerHTML = '';
-    if(!pass){ errBox.innerHTML = `<div class="error-box">Inserisci la password.</div>`; return; }
+    if(!email || !pass){ errBox.innerHTML = `<div class="error-box">Inserisci email e password.</div>`; return; }
+    state.authEmail = email;
     try{
       if(isRegister){
         const name = document.getElementById('authName').value.trim();
@@ -609,13 +573,25 @@ function renderAuthScreen(){
         await signInWithEmailAndPassword(auth, email, pass);
       }
     }catch(e){
+      if(isRegister && e.code==='auth/email-already-in-use'){
+        state.authStep = 'login';
+        renderAuthScreen();
+        toast('Questo indirizzo ha già un account: inserisci la password per accedere.');
+        return;
+      }
+      if(!isRegister && (e.code==='auth/user-not-found' || e.code==='auth/invalid-credential')){
+        errBox.innerHTML = `<div class="error-box">Email o password errate. Se non hai ancora un account, tocca "Non hai un account? Registrati" qui sotto.</div>`;
+        return;
+      }
       errBox.innerHTML = `<div class="error-box">${translateAuthError(e)}</div>`;
     }
   };
 
   const forgotBtn = document.getElementById('forgotBtn');
   if(forgotBtn) forgotBtn.onclick = async () => {
-    try{ await sendPasswordResetEmail(auth, state.authEmail); toast('Email di recupero inviata'); }
+    const email = document.getElementById('authEmail').value.trim();
+    if(!email){ toast('Inserisci prima la tua email'); return; }
+    try{ await sendPasswordResetEmail(auth, email); toast('Email di recupero inviata'); }
     catch(e){ toast(translateAuthError(e)); }
   };
 }
