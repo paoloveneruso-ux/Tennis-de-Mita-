@@ -130,7 +130,7 @@
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, updatePassword, EmailAuthProvider, reauthenticateWithCredential, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { getDatabase, ref, set, get, update, remove, onValue, push } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 /* ================= Firebase config ================= */
@@ -346,11 +346,6 @@ function openEditPriceModal({ bid, currentRate, memberName, courtId, courtName, 
         type:'modifica_quota', forMemberName: memberName, courtId, courtName,
         date, hour, mode, oldRate: currentRate, newRate, reason
       });
-      if(mode==='normale' || mode==='doppio'){
-        const statRef = push(ref(db, cpath('rateChangeStats')));
-        set(statRef, { forMemberName: memberName, courtId, date, hour, mode, oldRate: currentRate, newRate, reason, timestamp: Date.now() })
-          .catch(e=>console.error('rateChangeStats', e));
-      }
       toast('Quota aggiornata: € '+newRate.toFixed(2));
       overlay.remove();
     }catch(e){ toast('Errore: '+e.message); }
@@ -376,6 +371,11 @@ function renderProfileModal(){
         <button class="btn-ghost" id="closeProfile">Chiudi</button>
         <button class="btn-primary" id="saveProfile">Salva</button>
       </div>
+      <div class="section-title" style="margin-top:6px;">Cambia password</div>
+      <div class="field"><label>Password attuale</label><input id="curPass" type="password" autocomplete="current-password"></div>
+      <div class="field"><label>Nuova password</label><input id="newPass" type="password" autocomplete="new-password" placeholder="Almeno 6 caratteri"></div>
+      <div id="passErr"></div>
+      <button class="btn-ghost" id="changePassBtn" style="width:100%;">Aggiorna password</button>
     </div>`;
   document.body.appendChild(overlay);
 
@@ -406,6 +406,25 @@ function renderProfileModal(){
       overlay.remove();
     }catch(err){ toast('Errore: '+err.message); }
   };
+
+  overlay.querySelector('#changePassBtn').onclick = async () => {
+    const curPass = overlay.querySelector('#curPass').value;
+    const newPass = overlay.querySelector('#newPass').value;
+    const passErr = overlay.querySelector('#passErr');
+    passErr.innerHTML = '';
+    if(!curPass || !newPass){ passErr.innerHTML = `<div class="error-box">Inserisci password attuale e nuova.</div>`; return; }
+    if(newPass.length < 6){ passErr.innerHTML = `<div class="error-box">La nuova password deve avere almeno 6 caratteri.</div>`; return; }
+    try{
+      const cred = EmailAuthProvider.credential(state.email, curPass);
+      await reauthenticateWithCredential(auth.currentUser, cred);
+      await updatePassword(auth.currentUser, newPass);
+      toast('Password aggiornata');
+      overlay.querySelector('#curPass').value = '';
+      overlay.querySelector('#newPass').value = '';
+    }catch(err){
+      passErr.innerHTML = `<div class="error-box">${translateAuthError(err)}</div>`;
+    }
+  };
 }
 
 /* ================= Stato ================= */
@@ -425,7 +444,6 @@ const state = {
   bookingsPublic: {},
   bookingsPrivate: {},   // popolato solo se admin
   cancellationStats: {}, // popolato solo se admin
-  rateChangeStats: {},   // popolato solo se admin
   myBookingIds: {},
   blocks: {},
   courses: {},
@@ -624,7 +642,6 @@ function attachListeners(){
       privateListenerAttached = true;
       onValue(ref(db, cpath('bookingsPrivate')), s2=>{ state.bookingsPrivate = s2.val()||{}; renderCurrent(); }, err=>console.error('bookingsPrivate', err));
       onValue(ref(db, cpath('cancellationStats')), s3=>{ state.cancellationStats = s3.val()||{}; renderCurrent(); }, err=>console.error('cancellationStats', err));
-      onValue(ref(db, cpath('rateChangeStats')), s4=>{ state.rateChangeStats = s4.val()||{}; renderCurrent(); }, err=>console.error('rateChangeStats', err));
     }
     renderCurrent();
   }, showFatalError);
@@ -1097,42 +1114,76 @@ function renderLoyaltySection(host, meObj){
     const allLinkedMembers = Object.entries(state.members||{}).filter(([id,m])=>m.uid && id!==state.me).sort((a,b)=>a[1].name.localeCompare(b[1].name));
     toConfirm.forEach(({bid,b})=>{
       const court = (state.club.courts||[]).find(c=>c.id===b.courtId);
+      const numSlots = b.mode==='doppio' ? 3 : 1;
       const row = document.createElement('div');
       row.className = 'card';
       row.style.padding = '12px';
       row.style.marginBottom = '8px';
+      const slotHtml = (i)=>`
+        <div class="field" style="margin-top:${i>0?'8px':'0'};"><label>${numSlots>1?'Compagno '+(i+1):'Compagno di gioco'}${i>0?' (opzionale)':''}</label>
+          <select class="partnerSelect" data-i="${i}">
+            <option value="">— nessuno —</option>
+            <option value="__external__">Amico esterno</option>
+            ${allLinkedMembers.map(([id,m])=>`<option value="${id}">${m.name}</option>`).join('')}
+          </select>
+        </div>
+        <div class="externalNameWrap" data-i="${i}" style="display:none;margin-top:6px;"><input class="externalNameInput" data-i="${i}" placeholder="Nome dell'amico"></div>
+      `;
       row.innerHTML = `
         <div class="hint" style="margin-bottom:8px;">${fmtDateDisplay(b.date)} · ${String(b.hour).padStart(2,'0')}:00 · ${court?court.name:''} · ${modeLabel(b.mode)}</div>
-        <select class="partnerSelect">
-          <option value="">— scegli il compagno di gioco —</option>
-          <option value="__external__">Amico esterno</option>
-          ${allLinkedMembers.map(([id,m])=>`<option value="${id}">${m.name}</option>`).join('')}
-        </select>
-        <div class="externalNameWrap" style="display:none;margin-top:8px;"><input class="externalNameInput" placeholder="Nome dell'amico"></div>
-        <button class="btn-primary confirmBtn" style="width:100%;margin-top:8px;">Conferma</button>
+        ${Array.from({length:numSlots},(_,i)=>slotHtml(i)).join('')}
+        <button class="btn-primary confirmBtn" style="width:100%;margin-top:10px;">Conferma</button>
       `;
       listHost.appendChild(row);
-      const sel = row.querySelector('.partnerSelect');
-      const extWrap = row.querySelector('.externalNameWrap');
-      sel.onchange = () => { extWrap.style.display = sel.value==='__external__' ? 'block' : 'none'; };
+
+      row.querySelectorAll('.partnerSelect').forEach(sel=>{
+        sel.onchange = () => {
+          const extWrap = row.querySelector('.externalNameWrap[data-i="'+sel.dataset.i+'"]');
+          extWrap.style.display = sel.value==='__external__' ? 'block' : 'none';
+        };
+      });
+
       row.querySelector('.confirmBtn').onclick = async () => {
-        const val = sel.value;
-        if(!val){ toast('Scegli un compagno di gioco'); return; }
-        let partnerName = '', partnerMemberId = null;
-        if(val==='__external__'){
-          partnerName = row.querySelector('.externalNameInput').value.trim();
-          if(!partnerName){ toast('Inserisci il nome dell\'amico'); return; }
-        } else {
-          partnerMemberId = val;
-          partnerName = (state.members[val]||{}).name || '';
+        const partners = [];
+        const chosenMemberIds = new Set();
+        for(let i=0;i<numSlots;i++){
+          const sel = row.querySelector('.partnerSelect[data-i="'+i+'"]');
+          const val = sel.value;
+          if(!val) continue;
+          if(val==='__external__'){
+            const name = row.querySelector('.externalNameInput[data-i="'+i+'"]').value.trim();
+            if(!name) continue;
+            partners.push({ partnerName: name, partnerMemberId: null, partnerUid: null });
+          } else {
+            if(chosenMemberIds.has(val)) continue; // evita doppioni
+            chosenMemberIds.add(val);
+            const m = state.members[val] || {};
+            partners.push({ partnerName: m.name||'', partnerMemberId: val, partnerUid: m.uid||null });
+          }
         }
+        if(!partners.length){ toast('Scegli almeno un compagno di gioco'); return; }
+
         const band = findLoyaltyBand(b.date, b.hour);
+        const baseEntry = {
+          band: band ? band.id : null, date: b.date, hour: b.hour, courtId: b.courtId, mode: b.mode,
+          confirmedAt: Date.now()
+        };
         try{
+          // La propria conferma: registra tutti i compagni indicati
           await set(ref(db, cpath('loyaltyConfirmedBookings/'+state.uid+'/'+bid)), {
-            band: band ? band.id : null, date: b.date, hour: b.hour, courtId: b.courtId, mode: b.mode,
-            partnerName, partnerMemberId, confirmedAt: Date.now()
+            ...baseEntry, partners: partners.map(p=>({name:p.partnerName, memberId:p.partnerMemberId}))
           });
-          toast('Compagno confermato, grazie!');
+          // Accredita l'ora anche a ciascun compagno socio (non ai soli amici esterni)
+          for(const p of partners){
+            if(p.partnerUid && p.partnerUid !== state.uid){
+              try{
+                await set(ref(db, cpath('loyaltyConfirmedBookings/'+p.partnerUid+'/'+bid)), {
+                  ...baseEntry, partners: [{ name: (state.members[state.me]||{}).name||'', memberId: state.me }]
+                });
+              }catch(err){ console.error('credito compagno', p.partnerUid, err); }
+            }
+          }
+          toast('Compagni confermati, grazie!');
         }catch(e){ toast('Errore: '+e.message); }
       };
     });
@@ -1681,6 +1732,26 @@ function renderMaestroScreen(host){
 
   const myCourses = Object.entries(state.courses||{}).filter(([_,c])=>c.teacherUid===state.uid);
 
+  // Recuperi suggeriti, solo per i corsi che questo maestro tiene
+  myCourses.forEach(([cid])=>{ loadCourseEnrollments(cid); loadCourseAttendanceAll(cid); });
+  const absenceThresholdMaestro = (state.club && state.club.absenceThreshold) || 2;
+  const recuperiSuggeriti = [];
+  myCourses.forEach(([cid,c])=>{
+    const enrollments = Object.entries(state.courseEnrollments[cid]||{});
+    const history = state.courseAttendanceByCourse[cid] || {};
+    enrollments.forEach(([eid,e])=>{
+      let absences = 0;
+      Object.values(history).forEach(dayMap=>{ if(dayMap[eid]===false) absences++; });
+      if(absences >= absenceThresholdMaestro){
+        const alt = Object.entries(state.courses||{}).find(([cid2,c2])=>
+          cid2!==cid && c2.livello===c.livello && (c2.enrolledCount||0) < c2.maxSeats
+        );
+        recuperiSuggeriti.push({ cid, course: c, eid, student: e, absences, alt: alt ? alt[1] : null });
+      }
+    });
+  });
+  recuperiSuggeriti.sort((a,b)=>b.absences-a.absences);
+
   let weekHours = 0, weekRevenue = 0;
   const dayData = weekDays.map(dateStr=>{
     const lessons = Object.entries(state.myTeachingBookings||{})
@@ -1717,6 +1788,13 @@ function renderMaestroScreen(host){
     </div>
     <div id="daysHost"></div>
     <div class="hint">Le quote dei corsi sono mensili e vengono gestite dall'admin nella tab Corsi — qui vedi solo gli orari.</div>
+
+    ${myCourses.length ? `
+    <div class="card">
+      <div class="section-title">Recuperi suggeriti (${recuperiSuggeriti.length})</div>
+      <div class="hint" style="margin-bottom:8px;">Corsisti dei tuoi corsi con almeno ${absenceThresholdMaestro} assenze, con un corso alternativo dello stesso livello e posti liberi (se esiste).</div>
+      <div id="recuperiList">${recuperiSuggeriti.length ? '' : '<div class="hint">Nessun recupero da proporre al momento.</div>'}</div>
+    </div>` : ''}
   `;
   host.replaceChildren(screen);
 
@@ -1752,6 +1830,29 @@ function renderMaestroScreen(host){
       sessionsHost.appendChild(row);
     });
   });
+
+  const recuperiHost = screen.querySelector('#recuperiList');
+  if(recuperiHost){
+    recuperiSuggeriti.forEach(r=>{
+      const row = document.createElement('div'); row.className='list-row';
+      row.innerHTML = `<span>${r.student.name} · ${r.course.name} (${r.absences} assenze)${r.alt?' · consigliato: '+r.alt.name:' · nessun corso alternativo dello stesso livello con posti liberi'}</span>`;
+      if(r.student.phone){
+        const waBtn = document.createElement('button');
+        waBtn.className='small-btn'; waBtn.style.padding='6px 10px'; waBtn.style.fontSize='11px';
+        waBtn.textContent = 'Invita';
+        waBtn.onclick = () => {
+          const digits = normalizePhone(r.student.phone);
+          const altText = r.alt
+            ? `Ti proponiamo di recuperare nel corso "${r.alt.name}" (${r.alt.livello||''}).`
+            : `Contattaci per trovare insieme l'orario migliore per recuperare.`;
+          const msg = `Ciao ${r.student.name}, dal ${CLUB_NAME}: abbiamo notato ${r.absences} assenze nel corso "${r.course.name}" (${r.course.livello||''}). ${altText}`;
+          window.open(`https://wa.me/${digits}?text=${encodeURIComponent(msg)}`, '_blank');
+        };
+        row.appendChild(waBtn);
+      }
+      recuperiHost.appendChild(row);
+    });
+  }
 }
 
 /* ================= Vista Registro (super admin, nascosta) ================= */
@@ -1921,29 +2022,7 @@ function renderAdminScreen(host){
   }
 
   const now = new Date();
-
-  // Carica dati di tutti i corsi per individuare i recuperi da suggerire
-  Object.keys(state.courses||{}).forEach(cid=>{
-    loadCourseEnrollments(cid);
-    loadCourseAttendanceAll(cid);
-  });
   const absenceThreshold = (state.club && state.club.absenceThreshold) || 2;
-  const recuperiSuggeriti = [];
-  Object.entries(state.courses||{}).forEach(([cid,c])=>{
-    const enrollments = Object.entries(state.courseEnrollments[cid]||{});
-    const history = state.courseAttendanceByCourse[cid] || {};
-    enrollments.forEach(([eid,e])=>{
-      let absences = 0;
-      Object.values(history).forEach(dayMap=>{ if(dayMap[eid]===false) absences++; });
-      if(absences >= absenceThreshold){
-        const alt = Object.entries(state.courses||{}).find(([cid2,c2])=>
-          cid2!==cid && c2.livello===c.livello && (c2.enrolledCount||0) < c2.maxSeats
-        );
-        recuperiSuggeriti.push({ cid, course: c, eid, student: e, absences, alt: alt ? alt[1] : null });
-      }
-    });
-  });
-  recuperiSuggeriti.sort((a,b)=>b.absences-a.absences);
 
   // Scansione premi fedeltà da riscattare
   const linkedMembersForLoyalty = Object.entries(state.members||{}).filter(([_,m])=>m.uid);
@@ -2035,15 +2114,6 @@ function renderAdminScreen(host){
     byHourCancel[c.hour] = (byHourCancel[c.hour]||0)+1;
   });
   const hourCancelStats = Object.entries(byHourCancel).sort((a,b)=>b[1]-a[1]);
-
-  // Modifiche nelle ultime 24 ore (visibili a ogni admin, senza indicare quale admin)
-  const last24 = Date.now() - 24*3600*1000;
-  const rateChangesRecent = Object.values(state.rateChangeStats||{}).filter(c=>c.timestamp>=last24);
-  const cancelsRecent = cancelEntries.filter(c=>c.timestamp>=last24);
-  const recentChanges = [
-    ...rateChangesRecent.map(c=>({...c, kind:'rate'})),
-    ...cancelsRecent.map(c=>({...c, kind:'cancel'})),
-  ].sort((a,b)=>b.timestamp-a.timestamp);
 
   const screen = document.createElement('div');
   screen.className = 'screen';
@@ -2158,12 +2228,6 @@ function renderAdminScreen(host){
     </div>
 
     <div class="card">
-      <div class="section-title">Recuperi suggeriti (${recuperiSuggeriti.length})</div>
-      <div class="hint" style="margin-bottom:8px;">Corsisti con almeno ${absenceThreshold} assenze registrate, individuati automaticamente su tutti i corsi, con un corso alternativo dello stesso livello e posti liberi (se esiste).</div>
-      <div id="recuperiList">${recuperiSuggeriti.length ? '' : '<div class="hint">Nessun recupero da proporre al momento.</div>'}</div>
-    </div>
-
-    <div class="card">
       <div class="section-title">Raccolta punti — fasce orarie e soglie</div>
       <div class="hint" style="margin-bottom:8px;">Modifica giorni, orari e quante ore servono per maturare un campo gratis in ciascuna fascia.</div>
       <div id="loyaltyBandsEditor"></div>
@@ -2184,35 +2248,8 @@ function renderAdminScreen(host){
       <div class="hint" style="margin:10px 0 4px;"><b style="color:var(--chalk);">Per ora del giorno</b></div>
       <div id="cancelByHour">${hourCancelStats.length ? '' : '<div class="hint">—</div>'}</div>
     </div>
-
-    <div class="card">
-      <div class="section-title">Modifiche nelle ultime 24 ore (${recentChanges.length})</div>
-      <div class="hint" style="margin-bottom:8px;">Modifiche di tariffa e cancellazioni fatte nelle ultime 24 ore, per tenere sotto controllo cosa cambia sulle ore già giocate.</div>
-      <div id="recentChangesList">${recentChanges.length ? '' : '<div class="hint">Nessuna modifica nelle ultime 24 ore.</div>'}</div>
-    </div>
   `;
   host.replaceChildren(screen);
-
-  const recuperiHost = screen.querySelector('#recuperiList');
-  recuperiSuggeriti.forEach(r=>{
-    const row = document.createElement('div'); row.className='list-row';
-    row.innerHTML = `<span>${r.student.name} · ${r.course.name} (${r.absences} assenze)${r.alt?' · consigliato: '+r.alt.name:' · nessun corso alternativo dello stesso livello con posti liberi'}</span>`;
-    if(r.student.phone){
-      const waBtn = document.createElement('button');
-      waBtn.className='small-btn'; waBtn.style.padding='6px 10px'; waBtn.style.fontSize='11px';
-      waBtn.textContent = 'Invita';
-      waBtn.onclick = () => {
-        const digits = normalizePhone(r.student.phone);
-        const altText = r.alt
-          ? `Ti proponiamo di recuperare nel corso "${r.alt.name}" (${r.alt.livello||''}).`
-          : `Contattaci per trovare insieme l'orario migliore per recuperare.`;
-        const msg = `Ciao ${r.student.name}, dal ${CLUB_NAME}: abbiamo notato ${r.absences} assenze nel corso "${r.course.name}" (${r.course.livello||''}). ${altText}`;
-        window.open(`https://wa.me/${digits}?text=${encodeURIComponent(msg)}`, '_blank');
-      };
-      row.appendChild(waBtn);
-    }
-    recuperiHost.appendChild(row);
-  });
 
   // Editor fasce raccolta punti
   if(!state.draftLoyaltyBands){
@@ -2316,20 +2353,6 @@ function renderAdminScreen(host){
     const row = document.createElement('div'); row.className='list-row';
     row.innerHTML = `<span>${String(hour).padStart(2,'0')}:00</span><span class="pill">${count} volt${count>1?'e':'a'}</span>`;
     cancelByHourHost.appendChild(row);
-  });
-
-  const recentChangesHost = screen.querySelector('#recentChangesList');
-  recentChanges.forEach(c=>{
-    const court = (state.club.courts||[]).find(x=>x.id===c.courtId);
-    const d = new Date(c.timestamp);
-    const when = d.toLocaleDateString('it-IT')+' '+d.toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'});
-    const row = document.createElement('div'); row.className='list-row';
-    if(c.kind==='rate'){
-      row.innerHTML = `<span><b style="color:var(--clay);">Modifica quota</b><br><span class="hint">${when} · ${c.forMemberName||'—'} · ${court?court.name:''} ${fmtDateDisplay(c.date)} ${String(c.hour).padStart(2,'0')}:00 · € ${(c.oldRate||0).toFixed(2)} → € ${(c.newRate||0).toFixed(2)}${c.reason?' · motivo: '+c.reason:''}</span></span>`;
-    } else {
-      row.innerHTML = `<span><b style="color:var(--danger);">Cancellazione</b><br><span class="hint">${when} · ${c.forMemberName||'—'} · ${court?court.name:''} ${fmtDateDisplay(c.date)} ${String(c.hour).padStart(2,'0')}:00</span></span>`;
-    }
-    recentChangesHost.appendChild(row);
   });
 
   screen.querySelector('.period-strip').querySelectorAll('button').forEach(b=>{
