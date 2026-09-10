@@ -289,7 +289,7 @@ function getPriceReductionReasons(){
   return (state.club && state.club.priceReductionReasons) || DEFAULT_PRICE_REDUCTION_REASONS;
 }
 
-function openEditPriceModal({ bid, currentRate, memberName, courtId, courtName, date, hour, mode }){
+function openEditPriceModal({ bid, currentRate, memberName, memberUid, courtId, courtName, date, hour, mode }){
   document.querySelectorAll('.modal-overlay').forEach(el=>el.remove());
   const reasons = getPriceReductionReasons();
   const overlay = document.createElement('div');
@@ -307,6 +307,11 @@ function openEditPriceModal({ bid, currentRate, memberName, courtId, courtName, 
         </select>
       </div>
       <div class="field" id="reasonCustomWrap" style="display:none;"><label>Specifica il motivo</label><input id="reasonCustomInput" placeholder="Es. Torneo sociale"></div>
+      ${memberUid ? `
+      <div class="field" id="debtWrap" style="display:none;">
+        <label>Debito da segnare al socio (€) — es. differenza non pagata al momento</label>
+        <input id="debtInput" type="number" min="0" step="0.5" value="0">
+      </div>` : ''}
       <div class="btn-row">
         <button class="btn-ghost" id="cancelEditPrice">Annulla</button>
         <button class="btn-primary" id="confirmEditPrice">Salva</button>
@@ -318,13 +323,21 @@ function openEditPriceModal({ bid, currentRate, memberName, courtId, courtName, 
   const reasonWrap = overlay.querySelector('#reasonWrap');
   const reasonSelect = overlay.querySelector('#reasonSelect');
   const reasonCustomWrap = overlay.querySelector('#reasonCustomWrap');
+  const debtWrap = overlay.querySelector('#debtWrap');
+  const debtInput = overlay.querySelector('#debtInput');
   function syncReasonVisibility(){
     const newRate = parseFloat(rateInput.value);
-    reasonWrap.style.display = (!isNaN(newRate) && newRate < currentRate) ? 'flex' : 'none';
-    reasonCustomWrap.style.display = (reasonWrap.style.display==='flex' && reasonSelect.value==='__altro__') ? 'flex' : 'none';
+    const isReduction = !isNaN(newRate) && newRate < currentRate;
+    reasonWrap.style.display = isReduction ? 'flex' : 'none';
+    reasonCustomWrap.style.display = (isReduction && reasonSelect.value==='__altro__') ? 'flex' : 'none';
+    if(debtWrap){
+      debtWrap.style.display = isReduction ? 'flex' : 'none';
+      if(isReduction && debtInput.dataset.touched!=='1') debtInput.value = (currentRate - newRate).toFixed(2);
+    }
   }
   rateInput.oninput = syncReasonVisibility;
   reasonSelect.onchange = syncReasonVisibility;
+  if(debtInput) debtInput.oninput = () => { debtInput.dataset.touched = '1'; };
   syncReasonVisibility();
 
   overlay.querySelector('#cancelEditPrice').onclick = () => overlay.remove();
@@ -337,16 +350,22 @@ function openEditPriceModal({ bid, currentRate, memberName, courtId, courtName, 
       reason = reasonSelect.value === '__altro__' ? overlay.querySelector('#reasonCustomInput').value.trim() : reasonSelect.value;
       if(!reason){ toast('Indica un motivo per la riduzione'); return; }
     }
+    const debtAmount = (isReduction && debtInput) ? (parseFloat(debtInput.value) || 0) : 0;
     try{
       await update(ref(db, cpath('bookingsPrivate/'+bid)), { rate: newRate });
       if(isReduction && reasonSelect.value==='__altro__' && !reasons.includes(reason)){
         await update(ref(db, cpath('info')), { priceReductionReasons: [...reasons, reason] });
       }
+      if(debtAmount > 0 && memberUid){
+        const curSnap = await get(ref(db, cpath('memberDebts/'+memberUid+'/total')));
+        const newTotal = (curSnap.exists() ? curSnap.val() : 0) + debtAmount;
+        await update(ref(db, cpath('memberDebts/'+memberUid)), { total: newTotal, updatedAt: Date.now() });
+      }
       writeAuditLog({
         type:'modifica_quota', forMemberName: memberName, courtId, courtName,
-        date, hour, mode, oldRate: currentRate, newRate, reason
+        date, hour, mode, oldRate: currentRate, newRate, reason, debtAdded: debtAmount>0?debtAmount:null
       });
-      toast('Quota aggiornata: € '+newRate.toFixed(2));
+      toast('Quota aggiornata: € '+newRate.toFixed(2)+(debtAmount>0?' · debito registrato: € '+debtAmount.toFixed(2):''));
       overlay.remove();
     }catch(e){ toast('Errore: '+e.message); }
   };
@@ -363,6 +382,7 @@ function renderProfileModal(){
       <div class="hint" style="text-align:center;">Account collegato: <b style="color:var(--chalk);">${state.email||'—'}</b></div>
       <div style="display:flex;flex-direction:column;align-items:center;gap:10px;" id="avatarPreviewHost"></div>
       <div class="list-row"><span>Quota sociale ${new Date().getFullYear()}</span><span class="pill" style="${state.myMembershipFees[new Date().getFullYear()]?.paidAt?'':'color:var(--danger);border-color:var(--danger);'}">${state.myMembershipFees[new Date().getFullYear()]?.paidAt ? 'Pagata · € '+state.myMembershipFees[new Date().getFullYear()].amount.toFixed(2) : 'Da pagare'}</span></div>
+      ${state.myDebt>0 ? `<div class="list-row"><span>Debito con il circolo</span><span class="pill" style="color:var(--danger);border-color:var(--danger);">€ ${state.myDebt.toFixed(2)}</span></div>` : ''}
       <input type="file" accept="image/*" id="photoInput" style="display:none;">
       <button class="btn-ghost" id="pickPhotoBtn">Cambia foto</button>
       <div class="field"><label>Nome e cognome</label><input id="profName" value="${meObj.name||''}"></div>
@@ -478,6 +498,8 @@ const state = {
   auditTo: '',
   myLoyaltyConfirmed: {},
   myMembershipFees: {},
+  myDebt: 0,
+  adminMemberDebts: {}, // { [uid]: total } popolato solo admin
   adminMembershipFees: {}, // { [uid]: {year: {amount, paidAt}} } popolato solo admin
   loyaltyRedemptions: {},
   loyaltyAllConfirmed: {}, // popolato solo per admin (scansione fedeltà)
@@ -655,6 +677,7 @@ function attachListeners(){
   onValue(ref(db, cpath('recurringBookings')), s=>{ state.recurringBookings = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('loyaltyConfirmedBookings/'+state.uid)), s=>{ state.myLoyaltyConfirmed = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('membershipFees/'+state.uid)), s=>{ state.myMembershipFees = s.val()||{}; renderCurrent(); }, showFatalError);
+  onValue(ref(db, cpath('memberDebts/'+state.uid+'/total')), s=>{ state.myDebt = s.val()||0; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('loyaltyRedemptions/'+state.uid)), s=>{ state.loyaltyRedemptions[state.uid] = s.val()||{}; renderCurrent(); }, showFatalError);
   if(state.isSuperAdmin){
     onValue(ref(db, cpath('auditLog')), s=>{ state.auditLog = s.val()||{}; renderCurrent(); }, err=>console.error('auditLog', err));
@@ -674,6 +697,16 @@ function loadMembershipFeeForMember(uid){
     state.adminMembershipFees[uid] = s.val()||{};
     renderCurrent();
   }, err=>console.error('membershipFees', err));
+}
+
+const debtScanLoaded = new Set();
+function loadDebtForMember(uid){
+  if(debtScanLoaded.has(uid)) return;
+  debtScanLoaded.add(uid);
+  onValue(ref(db, cpath('memberDebts/'+uid+'/total')), s=>{
+    state.adminMemberDebts[uid] = s.val()||0;
+    renderCurrent();
+  }, err=>console.error('memberDebts', err));
 }
 
 const loyaltyScanLoaded = new Set();
@@ -1947,9 +1980,10 @@ function renderMembersScreen(host){
   screen.querySelector('#memberSearch').oninput = (e)=> paint(e.target.value);
 }
 
-/* ================= Dettaglio socio per admin (quota + punti fedeltà) ================= */
+/* ================= Dettaglio socio per admin (quota + debito + punti fedeltà) ================= */
 function renderMemberDetailModal(m){
   loadMembershipFeeForMember(m.uid);
+  loadDebtForMember(m.uid);
   loadLoyaltyForMember(m.uid);
   document.querySelectorAll('.modal-overlay').forEach(el=>el.remove());
   const curYear = new Date().getFullYear();
@@ -1961,6 +1995,11 @@ function renderMemberDetailModal(m){
       <div id="memberFeeStatus"></div>
       <div class="field" style="margin-top:8px;"><label>Importo (€)</label><input id="memberFeeAmount" type="number" min="0" step="1"></div>
       <button class="btn-primary" id="memberFeeSaveBtn" style="width:100%;margin-top:6px;">Segna pagata</button>
+      <div class="section-title" style="margin-top:8px;">Debito con il circolo</div>
+      <div id="memberDebtStatus"></div>
+      <div class="field" style="margin-top:8px;"><label>Nuovo importo debito (€)</label><input id="memberDebtAmount" type="number" min="0" step="0.5"></div>
+      <div class="hint">Imposta 0 per azzerarlo.</div>
+      <button class="btn-primary" id="memberDebtSaveBtn" style="width:100%;margin-top:6px;">Aggiorna debito</button>
       <div class="section-title" style="margin-top:8px;">Raccolta punti</div>
       <div id="memberLoyaltyHost"><div class="hint">Caricamento…</div></div>
       <button class="btn-ghost" id="closeMemberDetail">Chiudi</button>
@@ -1981,7 +2020,20 @@ function renderMemberDetailModal(m){
     }catch(e){ toast('Errore: '+e.message); }
   };
 
-  // Aggiorna solo le parti in sola lettura: non tocca mai l'input mentre l'admin ci scrive dentro
+  const debtAmountInput = overlay.querySelector('#memberDebtAmount');
+  const debtStatusHost = overlay.querySelector('#memberDebtStatus');
+  let debtPrefilled = false;
+
+  overlay.querySelector('#memberDebtSaveBtn').onclick = async () => {
+    const amount = parseFloat(debtAmountInput.value);
+    if(isNaN(amount) || amount<0){ toast('Inserisci un importo valido'); return; }
+    try{
+      await update(ref(db, cpath('memberDebts/'+m.uid)), { total: amount, updatedAt: Date.now() });
+      toast(amount===0 ? 'Debito azzerato' : 'Debito aggiornato');
+    }catch(e){ toast('Errore: '+e.message); }
+  };
+
+  // Aggiorna solo le parti in sola lettura: non tocca mai gli input mentre l'admin ci scrive dentro
   function refreshReadOnly(){
     if(!document.body.contains(overlay)) return false;
     const scan = state.adminMembershipFees[m.uid];
@@ -1993,12 +2045,20 @@ function renderMemberDetailModal(m){
         amountPrefilled = true;
       }
     }
+    const debtTotal = state.adminMemberDebts[m.uid];
+    if(debtTotal !== undefined){
+      debtStatusHost.innerHTML = `<div class="list-row"><span>Debito attuale</span><span class="pill" style="${debtTotal>0?'color:var(--danger);border-color:var(--danger);':''}">€ ${debtTotal.toFixed(2)}</span></div>`;
+      if(!debtPrefilled){
+        debtAmountInput.value = debtTotal;
+        debtPrefilled = true;
+      }
+    }
     const loyaltyScan = state.adminLoyaltyScan[m.uid];
     if(loyaltyScan && loyaltyScan.confirmed!==undefined && loyaltyScan.redemptions!==undefined){
       const progress = computeLoyaltyProgress(loyaltyScan.confirmed, loyaltyScan.redemptions);
       overlay.querySelector('#memberLoyaltyHost').innerHTML = progress.map(loyaltyBarHtml).join('');
     }
-    return scan!==undefined && loyaltyScan && loyaltyScan.confirmed!==undefined && loyaltyScan.redemptions!==undefined;
+    return scan!==undefined && debtTotal!==undefined && loyaltyScan && loyaltyScan.confirmed!==undefined && loyaltyScan.redemptions!==undefined;
   }
 
   if(!refreshReadOnly()){
@@ -2415,7 +2475,7 @@ function renderAdminScreen(host){
     if(b.mode==='normale' || b.mode==='doppio'){
       const editPrice = document.createElement('button'); editPrice.className='small-btn'; editPrice.textContent='Modifica quota';
       editPrice.onclick = () => {
-        openEditPriceModal({ bid, currentRate, memberName: b.memberName, courtId: b.courtId, courtName: court?court.name:'', date: b.date, hour: b.hour, mode: b.mode });
+        openEditPriceModal({ bid, currentRate, memberName: b.memberName, memberUid: b.uid, courtId: b.courtId, courtName: court?court.name:'', date: b.date, hour: b.hour, mode: b.mode });
       };
       row.appendChild(editPrice);
     }
