@@ -453,6 +453,7 @@ const state = {
   authChecked: false,
   authStep: 'email',
   authEmail: '',
+  inviteMid: null,
   club: null,
   admins: {},
   isAdmin: false,
@@ -533,6 +534,8 @@ function showFatalError(err){
 
 /* ================= Bootstrap ================= */
 function boot(){
+  const params = new URLSearchParams(location.search);
+  state.inviteMid = params.get('invite') || null;
   onAuthStateChanged(auth, async (user) => {
     state.authChecked = true;
     if(!user){
@@ -569,6 +572,58 @@ async function ensureBootstrap(){
 }
 
 /* ================= Login / Registrazione ================= */
+/* ================= Completamento invito (link personalizzato da admin) ================= */
+function renderInviteScreen(){
+  root.innerHTML = `<div class="loading">Verifico l'invito…</div>`;
+  const mid = state.inviteMid;
+  get(ref(db, cpath('members/'+mid+'/uid'))).then(snap=>{
+    if(snap.exists() && snap.val()){
+      root.innerHTML = `<div class="screen"><div class="error-box">Questo invito è già stato usato per completare la registrazione. Se sei tu, usa "Accedi" con l'email che hai impostato.</div><button class="link" id="goNormalAuth" style="align-self:center;margin-top:10px;">Vai alla schermata di accesso</button></div>`;
+      document.getElementById('goNormalAuth').onclick = () => { state.inviteMid = null; renderCurrent(); };
+      return;
+    }
+    root.innerHTML = `
+      <div class="court-header">
+        <div class="eyebrow">${CLUB_NAME}</div>
+        <h1>Completa la registrazione</h1>
+        <div class="court-line"></div>
+      </div>
+      <div class="screen">
+        <div class="hint">Il circolo ti ha già registrato come socio. Completa qui il tuo account per collegarti al tuo profilo.</div>
+        <div class="card" style="display:flex;flex-direction:column;gap:12px;">
+          <div class="field"><label>Cellulare (opzionale)</label><input id="invitePhone" type="tel" placeholder="Es. 333 1234567"></div>
+          <div class="field"><label>Email</label><input id="inviteEmail" type="email" placeholder="tuaemail@esempio.it" autocomplete="email"></div>
+          <div class="field"><label>Password</label><input id="invitePass" type="password" placeholder="Almeno 6 caratteri" autocomplete="new-password"></div>
+          <div id="inviteErr"></div>
+          <button class="btn-primary" id="inviteSubmit">Crea il tuo account</button>
+        </div>
+      </div>`;
+    document.getElementById('inviteSubmit').onclick = async () => {
+      const phone = document.getElementById('invitePhone').value.trim();
+      const email = document.getElementById('inviteEmail').value.trim();
+      const pass = document.getElementById('invitePass').value;
+      const errBox = document.getElementById('inviteErr');
+      errBox.innerHTML = '';
+      if(!email || !pass){ errBox.innerHTML = `<div class="error-box">Inserisci email e password.</div>`; return; }
+      try{
+        const cred = await createUserWithEmailAndPassword(auth, email, pass);
+        const existingSnap = await get(ref(db, cpath('members/'+mid)));
+        const existing = existingSnap.val() || {};
+        if(existing.uid){
+          errBox.innerHTML = `<div class="error-box">Questo invito è appena stato usato da qualcun altro. Contatta l'admin del circolo.</div>`;
+          return;
+        }
+        await update(ref(db, cpath('members/'+mid)), { uid: cred.user.uid, phone: phone || existing.phone || null });
+        state.inviteMid = null;
+      }catch(e){
+        errBox.innerHTML = `<div class="error-box">${translateAuthError(e)}</div>`;
+      }
+    };
+  }).catch(e=>{
+    root.innerHTML = `<div class="screen"><div class="error-box">Errore nel verificare l'invito: ${e.message}</div></div>`;
+  });
+}
+
 function renderAuthScreen(){
   const isRegister = (state.authStep || 'login') === 'register';
   root.innerHTML = `
@@ -809,7 +864,7 @@ function determineMe(){
 
 function renderCurrent(){
   if(!state.authChecked){ root.innerHTML = `<div class="loading">Verifico l'accesso…</div>`; return; }
-  if(!state.uid){ renderAuthScreen(); return; }
+  if(!state.uid){ if(state.inviteMid) renderInviteScreen(); else renderAuthScreen(); return; }
   if(!state.club) { root.innerHTML = `<div class="loading">Carico il circolo…</div>`; return; }
   if(!state.me){ renderCompleteProfile(); } else { renderApp(); }
 }
@@ -1972,12 +2027,49 @@ function renderMembersScreen(host){
       if(state.isAdmin && m.uid){
         row.style.cursor = 'pointer';
         row.onclick = () => renderMemberDetailModal(m);
+      } else if(state.isAdmin && !m.uid){
+        const btn = document.createElement('button');
+        btn.className = 'small-btn'; btn.textContent = 'Link invito';
+        btn.onclick = (e) => { e.stopPropagation(); renderInviteLinkModal(id, m); };
+        row.appendChild(btn);
       }
       memList.appendChild(row);
     });
   }
   paint('');
   screen.querySelector('#memberSearch').oninput = (e)=> paint(e.target.value);
+}
+
+/* ================= Link invito per socio non ancora registrato (admin) ================= */
+function renderInviteLinkModal(mid, m){
+  document.querySelectorAll('.modal-overlay').forEach(el=>el.remove());
+  const baseUrl = location.origin + location.pathname;
+  const link = baseUrl + '?invite=' + mid;
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <h4>Link invito — ${m.name}</h4>
+      <div class="hint">Manda questo link al socio: aprendolo potrà creare il suo account e verrà collegato automaticamente a questo profilo già esistente, senza crearne uno nuovo.</div>
+      <div class="copy-code" style="font-size:13px;word-break:break-all;letter-spacing:0;">${link}</div>
+      <div class="btn-row">
+        <button class="btn-ghost" id="copyInviteLink">Copia link</button>
+        ${m.phone ? `<button class="btn-primary" id="waInviteLink">Invia su WhatsApp</button>` : ''}
+      </div>
+      <button class="btn-ghost" id="closeInviteLink">Chiudi</button>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#closeInviteLink').onclick = () => overlay.remove();
+  overlay.querySelector('#copyInviteLink').onclick = async () => {
+    try{ await navigator.clipboard.writeText(link); toast('Link copiato'); }
+    catch(e){ toast('Copia manuale: seleziona il testo sopra'); }
+  };
+  const waBtn = overlay.querySelector('#waInviteLink');
+  if(waBtn) waBtn.onclick = () => {
+    const digits = normalizePhone(m.phone);
+    const msg = `Ciao ${m.name}, dal ${CLUB_NAME}: completa la registrazione al circolo con questo link — ${link}`;
+    window.open(`https://wa.me/${digits}?text=${encodeURIComponent(msg)}`, '_blank');
+  };
 }
 
 /* ================= Dettaglio socio per admin (quota + debito + punti fedeltà) ================= */
