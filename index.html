@@ -99,6 +99,13 @@
   .reco-row:last-child{border-bottom:none;}
   .reco-row.skipped{opacity:.55;}
   .reco-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;}
+  .course-actions{display:grid;gap:8px;margin-top:10px;}
+  .course-actions button{width:100%;min-width:0;padding:10px 6px;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .cal-att{margin:2px 0 8px;font-size:13px;color:var(--ink-dim);display:flex;flex-direction:column;gap:5px;}
+  .cal-att .pill{margin-right:6px;}
+  .pay-opts.g4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;width:100%;}
+  .pay-opts.g4 .small-btn{width:100%;padding:8px 2px;overflow:hidden;text-overflow:ellipsis;}
+  .pay-month .pay-opts.g4{flex:1 1 100%;}
   .pw-wrap{position:relative;width:100%;}
   .pw-wrap input{padding-right:84px;}
   .pw-toggle{position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--ball);font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.05em;padding:8px;cursor:pointer;}
@@ -534,6 +541,7 @@ const state = {
   payLimit: 30,
   payExpanded: {},
   paySplit: {},
+  incMonth: null,
   myEnrollmentData: {},
   courseRecoveries: {},
   myAttendance: {},
@@ -756,6 +764,11 @@ document.addEventListener('click', (e)=>{
    I mesi dovuti di default sono tutti quelli dall'inizio del corso al mese corrente. */
 const PAY_EXEMPT = 'esente';
 function payStatus(payMap, m){ const v = payMap ? payMap[m] : undefined; return v===true ? 'paid' : (v===PAY_EXEMPT ? 'exempt' : 'due'); }
+const METHOD_LABEL = { cash:'Contanti', card:'Carta' };
+function payMethodOf(payMap, m){ const mt = payMap && payMap._meta && payMap._meta[m]; return (mt && (mt.m==='cash' || mt.m==='card')) ? mt.m : ''; }
+function payKey(payMap, m){ const st = payStatus(payMap, m); return st!=='paid' ? st : (payMethodOf(payMap, m) || 'paid'); }
+function blockKey(payMap, blk){ const set = new Set(blk.map(m=>payKey(payMap, m))); return set.size===1 ? [...set][0] : 'mixed'; }
+function payDateOf(payMap, m){ const mt = payMap && payMap._meta && payMap._meta[m]; return mt && mt.t ? new Date(mt.t).toLocaleDateString('it-IT',{day:'2-digit',month:'2-digit'}) : ''; }
 function addMonthsYM(ym, n){ let [y,m] = ym.split('-').map(Number); m += n; while(m>12){ m-=12; y++; } return y+'-'+String(m).padStart(2,'0'); }
 /* Blocchi di pagamento: bimestrale (default) = 2 mesi insieme, dovuti dal primo mese del blocco;
    mensile = un mese per volta. Ultimo blocco del corso: può avere un solo mese. */
@@ -782,10 +795,10 @@ function courseDueSummary(course, payMap, billing){
   const fee = Number(course.monthlyFee)||0;
   const blocks = billingBlocks(course, billing);
   const months = blocks.flat();
-  const s = { blocks, months, due:0, paid:0, exempt:0, dueMonths:[], fee, billing: billing==='monthly' ? 'monthly' : 'bimonthly' };
+  const s = { blocks, months, due:0, paid:0, exempt:0, dueMonths:[], methods:new Set(), fee, billing: billing==='monthly' ? 'monthly' : 'bimonthly' };
   months.forEach(m=>{
     const st = payStatus(payMap, m);
-    if(st==='paid') s.paid++; else if(st==='exempt') s.exempt++; else { s.due++; s.dueMonths.push(m); }
+    if(st==='paid'){ s.paid++; s.methods.add(payMethodOf(payMap, m) || '?'); } else if(st==='exempt') s.exempt++; else { s.due++; s.dueMonths.push(m); }
   });
   s.dueAmount = s.due*fee; s.paidAmount = s.paid*fee;
   return s;
@@ -794,11 +807,26 @@ function payPill(s){
   if(s.due>0) return { label:'Da pagare € '+fmtEuro(s.dueAmount), style:'color:var(--danger);border-color:var(--danger);' };
   if(!s.months.length) return { label:'Non ancora dovuto', style:'color:var(--ink-dim);' };
   if(s.paid===0) return { label:'Esente', style:'' };
-  return { label:'Pagato', style:'' };
+  let label = 'Pagato';
+  if(s.methods && s.methods.size===1){ const k = [...s.methods][0]; if(METHOD_LABEL[k]) label += ' · '+METHOD_LABEL[k]; }
+  return { label, style:'' };
 }
-async function setPaymentBlock(cid, eid, months, status){
-  const v = status==='paid' ? true : (status==='exempt' ? PAY_EXEMPT : false);
-  const obj = {}; months.forEach(m=>{ obj[m] = v; });
+async function setPaymentBlock(cid, eid, months, status, method){
+  const c = state.courses[cid] || {};
+  const fee = Number(c.monthlyFee) || 0;
+  const now = Date.now();
+  const prevMeta = (((state.coursePayments[cid]||{})[eid]) || {})._meta || {};
+  const obj = {};
+  months.forEach(m=>{
+    if(status==='paid'){
+      obj[m] = true;
+      const keepT = prevMeta[m] && prevMeta[m].t ? prevMeta[m].t : now;   // cambiare metodo non sposta la data dell'incasso
+      obj['_meta/'+m] = { m: method==='card' ? 'card' : 'cash', t: keepT, a: (prevMeta[m] && prevMeta[m].a!=null) ? prevMeta[m].a : fee };
+    } else {
+      obj[m] = status==='exempt' ? PAY_EXEMPT : false;
+      obj['_meta/'+m] = null;
+    }
+  });
   try{ await update(ref(db, cpath('coursePayments/'+cid+'/'+eid)), obj); }
   catch(err){ toast('Errore: '+err.message); }
 }
@@ -835,24 +863,28 @@ function buildPayDetail(r, repaint){
     det.appendChild(h);
   }
   const optsFor = (months, cur) => {
-    const wrap = document.createElement('div'); wrap.className = 'pay-opts';
-    [['due','Da pagare'],['paid','Pagato'],['exempt','Esente']].forEach(([k,txt])=>{
+    const wrap = document.createElement('div'); wrap.className = 'pay-opts g4';
+    [['due','Da pagare'],['cash','Contanti'],['card','Carta'],['exempt','Esente']].forEach(([k,txt])=>{
       const b = document.createElement('button');
-      b.className = 'small-btn' + (cur===k ? ' on-'+k : '');
+      b.className = 'small-btn' + (cur===k ? (k==='due' ? ' on-due' : (k==='exempt' ? ' on-exempt' : ' on-paid')) : '');
       b.textContent = txt;
-      b.onclick = () => { if(cur!==k) setPaymentBlock(r.cid, r.eid, months, k); };
+      b.onclick = () => {
+        if(cur===k) return;
+        if(k==='cash' || k==='card') setPaymentBlock(r.cid, r.eid, months, 'paid', k);
+        else setPaymentBlock(r.cid, r.eid, months, k);
+      };
       wrap.appendChild(b);
     });
     return wrap;
   };
   s.blocks.forEach(blk=>{
-    const st = blockStatus(r.payMap, blk);
+    const st = blockKey(r.payMap, blk);
     const splitKey = r.key+'|'+blk[0];
     const split = blk.length>1 && (st==='mixed' || state.paySplit[splitKey]);
     if(!split){
       const line = document.createElement('div'); line.className = 'pay-month';
       const l = document.createElement('span');
-      l.textContent = fmtBlock(blk)+' · € '+fmtEuro(blk.length*s.fee);
+      l.textContent = fmtBlock(blk)+' · € '+fmtEuro(blk.length*s.fee)+(st==='paid' ? ' · metodo non indicato' : '')+((st==='cash'||st==='card') ? ' · '+payDateOf(r.payMap, blk[0]) : '');
       line.appendChild(l);
       line.appendChild(optsFor(blk, st));
       det.appendChild(line);
@@ -869,9 +901,10 @@ function buildPayDetail(r, repaint){
       det.appendChild(head);
       blk.forEach(m=>{
         const line = document.createElement('div'); line.className = 'pay-month';
-        const l = document.createElement('span'); l.textContent = fmtMonth(m)+' · € '+fmtEuro(s.fee);
+        const km = payKey(r.payMap, m);
+        const l = document.createElement('span'); l.textContent = fmtMonth(m)+' · € '+fmtEuro(s.fee)+(km==='paid' ? ' · metodo non indicato' : '')+((km==='cash'||km==='card') ? ' · '+payDateOf(r.payMap, m) : '');
         line.appendChild(l);
-        line.appendChild(optsFor([m], payStatus(r.payMap, m)));
+        line.appendChild(optsFor([m], km));
         det.appendChild(line);
       });
       if(st!=='mixed'){
@@ -886,14 +919,16 @@ function buildPayDetail(r, repaint){
   if(s.due>0){
     const acts = document.createElement('div');
     acts.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;';
-    const allBtn = document.createElement('button');
-    allBtn.className = 'btn-ghost'; allBtn.style.cssText = 'flex:1;padding:9px 10px;font-size:12px;';
-    allBtn.textContent = 'Segna tutto pagato';
-    allBtn.onclick = () => setPaymentBlock(r.cid, r.eid, s.dueMonths, 'paid');
-    acts.appendChild(allBtn);
+    [['cash','Tutto pagato · Contanti'],['card','Tutto pagato · Carta']].forEach(([k,txt])=>{
+      const bt = document.createElement('button');
+      bt.className = 'btn-ghost'; bt.style.cssText = 'flex:1 1 45%;padding:9px 6px;font-size:12px;';
+      bt.textContent = txt;
+      bt.onclick = () => setPaymentBlock(r.cid, r.eid, s.dueMonths, 'paid', k);
+      acts.appendChild(bt);
+    });
     if(r.e.phone){
       const wa = document.createElement('button');
-      wa.className = 'btn-ghost'; wa.style.cssText = 'flex:1;padding:9px 10px;font-size:12px;';
+      wa.className = 'btn-ghost'; wa.style.cssText = 'flex:1 1 100%;padding:9px 10px;font-size:12px;';
       wa.textContent = 'Sollecita su WhatsApp';
       const dueLabel = s.blocks
         .map(b=>b.filter(m=>payStatus(r.payMap,m)==='due'))
@@ -914,13 +949,129 @@ async function setPayment(cid, eid, m, status){
 }
 
 function corsiSwitchHtml(){
-  return '<div class="seg" id="corsiSwitch"><button data-v="corsi" class="'+(state.corsiView!=='pagamenti'?'active':'')+'">Corsi</button><button data-v="pagamenti" class="'+(state.corsiView==='pagamenti'?'active':'')+'">Pagamenti</button></div>';
+  const v = state.corsiView;
+  const btn = (k,lab)=>'<button data-v="'+k+'" class="'+((v||'corsi')===k?'active':'')+'">'+lab+'</button>';
+  return '<div class="seg" id="corsiSwitch">'+btn('corsi','Corsi')+btn('pagamenti','Pagamenti')+btn('incassi','Incassi')+'</div>';
 }
 function bindCorsiSwitch(scope){
   scope.querySelectorAll('#corsiSwitch button').forEach(b=>{ b.onclick = ()=>{ state.corsiView = b.dataset.v; renderApp(); }; });
 }
 
 /* Lista completa dei corsisti con stato pagamenti (solo admin) */
+/* ================= Incassi mensili (solo admin): contanti / carta / totale ================= */
+function ymOfTs(t){ const d = new Date(t); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
+function collectPayments(){
+  const groups = {}; let legacy = 0;
+  Object.entries(state.coursePayments||{}).forEach(([cid, byEid])=>{
+    const c = state.courses[cid]; if(!c) return;
+    Object.entries(byEid||{}).forEach(([eid, payMap])=>{
+      if(!payMap || typeof payMap !== 'object') return;
+      const meta = payMap._meta || {};
+      Object.keys(payMap).forEach(m=>{
+        if(m==='_meta' || payMap[m]!==true) return;
+        const mt = meta[m];
+        if(!mt || !mt.t || (mt.m!=='cash' && mt.m!=='card')){ legacy++; return; }
+        const key = cid+'|'+eid+'|'+mt.t+'|'+mt.m;
+        const g = groups[key] || (groups[key] = { cid, eid, t:mt.t, method:mt.m, amount:0, months:[], ym: ymOfTs(mt.t) });
+        g.amount += Number(mt.a!=null ? mt.a : c.monthlyFee) || 0;
+        g.months.push(m);
+      });
+    });
+  });
+  const list = Object.values(groups);
+  list.forEach(g=>{
+    g.months.sort();
+    const e = ((state.courseEnrollments[g.cid]||{})[g.eid]) || {};
+    g.name = e.name || '—';
+    g.courseName = (state.courses[g.cid]||{}).name || '';
+  });
+  return { list, legacy };
+}
+function renderIncassiScreen(host){
+  if(!state.isAdmin){ state.corsiView = 'corsi'; return renderCorsiScreen(host); }
+  const courses = Object.entries(state.courses||{});
+  courses.forEach(([cid])=>{ loadCourseEnrollments(cid); loadCoursePaymentsForCourse(cid); });
+  if(!state.incMonth) state.incMonth = currentYearMonth();
+  const loadedCount = courses.filter(([cid])=> state.courseEnrollments[cid]!==undefined && state.payLoaded[cid]).length;
+
+  const screen = document.createElement('div');
+  screen.className = 'screen';
+  screen.innerHTML = `
+    ${corsiSwitchHtml()}
+    <div class="card">
+      <div class="section-title">Incassi corsi</div>
+      <div class="seg" style="margin-bottom:10px;">
+        <button id="incPrev">◀</button><button id="incLabel" style="flex:3;cursor:default;text-transform:capitalize;"></button><button id="incNext">▶</button>
+      </div>
+      <div id="incTotals"></div>
+      <div class="hint" id="incNote" style="margin-top:8px;"></div>
+      <button class="btn-ghost" id="incCopy" style="width:100%;margin-top:10px;">Copia riepilogo del mese</button>
+    </div>
+    <div class="card"><div class="section-title">Per corso</div><div id="incCourses"></div></div>
+    <div class="card"><div class="section-title" id="incListTitle">Pagamenti del mese</div><div id="incList"></div></div>`;
+  host.replaceChildren(screen);
+  bindCorsiSwitch(screen);
+
+  const { list, legacy } = collectPayments();
+  const ym = state.incMonth;
+  const inMonth = list.filter(g=>g.ym===ym).sort((a,b)=>b.t-a.t);
+  const sum = (arr, k) => arr.filter(g=>!k || g.method===k).reduce((a,g)=>a+g.amount, 0);
+  const cnt = (arr, k) => arr.filter(g=>!k || g.method===k).length;
+  const cash = sum(inMonth,'cash'), card = sum(inMonth,'card'), total = cash+card;
+
+  screen.querySelector('#incLabel').textContent = fmtMonth(ym);
+  screen.querySelector('#incPrev').onclick = () => { state.incMonth = addMonthsYM(ym,-1); renderApp(); };
+  screen.querySelector('#incNext').onclick = () => { state.incMonth = addMonthsYM(ym,1); renderApp(); };
+  screen.querySelector('#incTotals').innerHTML = `
+    <div class="list-row"><span>Contanti</span><span class="pill">€ ${fmtEuro(cash)} · ${cnt(inMonth,'cash')} pag.</span></div>
+    <div class="list-row"><span>Carta</span><span class="pill">€ ${fmtEuro(card)} · ${cnt(inMonth,'card')} pag.</span></div>
+    <div class="list-row"><span><b style="color:var(--chalk);">Totale</b></span><span class="pill" style="color:var(--ball);border-color:var(--ball);">€ ${fmtEuro(total)} · ${inMonth.length} pag.</span></div>`;
+  const cur = currentYearMonth();
+  let note = ym===cur ? 'Mese in corso: totale provvisorio, si aggiorna a ogni pagamento registrato.' : (ym<cur ? 'Mese chiuso.' : 'Mese futuro.');
+  if(legacy>0) note += ' ' + legacy + (legacy===1?' mese risulta pagato':' mesi risultano pagati') + ' senza metodo (registrati prima): aprili in Pagamenti e scegli Contanti o Carta.';
+  if(loadedCount < courses.length) note += ' Carico i dati… ('+loadedCount+'/'+courses.length+' corsi)';
+  screen.querySelector('#incNote').textContent = note;
+
+  // per corso
+  const byCourse = {};
+  inMonth.forEach(g=>{ (byCourse[g.cid] = byCourse[g.cid] || []).push(g); });
+  const cHost = screen.querySelector('#incCourses');
+  if(!inMonth.length) cHost.innerHTML = `<div class="hint">Nessun pagamento registrato in questo mese.</div>`;
+  Object.entries(byCourse).sort((a,b)=>String((state.courses[a[0]]||{}).name).localeCompare(String((state.courses[b[0]]||{}).name),'it')).forEach(([cid,arr])=>{
+    const row = document.createElement('div'); row.className = 'list-row'; row.style.flexWrap = 'wrap'; row.style.gap = '4px 8px';
+    row.innerHTML = `<span>${esc((state.courses[cid]||{}).name||'')}</span><span class="pill">Contanti € ${fmtEuro(sum(arr,'cash'))} · Carta € ${fmtEuro(sum(arr,'card'))} · Tot. € ${fmtEuro(sum(arr))}</span>`;
+    cHost.appendChild(row);
+  });
+
+  // elenco pagamenti
+  screen.querySelector('#incListTitle').textContent = 'Pagamenti del mese ('+inMonth.length+')';
+  const lHost = screen.querySelector('#incList');
+  if(!inMonth.length) lHost.innerHTML = `<div class="hint">Nessun pagamento.</div>`;
+  inMonth.forEach(g=>{
+    const row = document.createElement('div'); row.className = 'pay-row';
+    const when = new Date(g.t).toLocaleDateString('it-IT',{day:'2-digit',month:'2-digit'});
+    row.innerHTML = `<div class="pay-head" style="cursor:default;"><div style="min-width:0;"><div class="pay-name">${esc(g.name)}</div><div class="hint">${esc(g.courseName)} · ${esc(fmtBlock(g.months))} · ${when}</div></div><span class="pill">€ ${fmtEuro(g.amount)} · ${METHOD_LABEL[g.method]}</span></div>`;
+    lHost.appendChild(row);
+  });
+
+  // riepilogo da copiare / inoltrare
+  screen.querySelector('#incCopy').onclick = async () => {
+    const lines = ['Incassi corsi — '+fmtMonth(ym),
+      'Contanti: € '+fmtEuro(cash)+' ('+cnt(inMonth,'cash')+' pagamenti)',
+      'Carta: € '+fmtEuro(card)+' ('+cnt(inMonth,'card')+' pagamenti)',
+      'Totale: € '+fmtEuro(total)+' ('+inMonth.length+' pagamenti)'];
+    if(Object.keys(byCourse).length){
+      lines.push('', 'Per corso:');
+      Object.entries(byCourse).forEach(([cid,arr])=>lines.push('- '+((state.courses[cid]||{}).name||'')+': contanti € '+fmtEuro(sum(arr,'cash'))+', carta € '+fmtEuro(sum(arr,'card'))+', totale € '+fmtEuro(sum(arr))));
+    }
+    const text = lines.join('\n');
+    try{
+      if(navigator.clipboard && navigator.clipboard.writeText){ await navigator.clipboard.writeText(text); toast('Riepilogo copiato'); }
+      else { window.prompt('Copia il riepilogo:', text); }
+    }catch(_){ window.prompt('Copia il riepilogo:', text); }
+  };
+}
+
 function renderPaymentsScreen(host){
   if(!state.isAdmin){ state.corsiView = 'corsi'; return renderCorsiScreen(host); }
   const courses = Object.entries(state.courses||{}).sort((a,b)=>String(a[1].name||'').localeCompare(String(b[1].name||''),'it'));
@@ -1056,6 +1207,17 @@ function loadMyAttendance(cid, date, eid){
     state.myAttendance[cid+'|'+date] = s.val();
     renderCurrent();
   }, err=>console.error('myAttendance', err));
+}
+const myRecoListeners = new Set();
+function loadMyRecoveries(cid, eid){
+  if(!eid) return;
+  const key = cid+'|'+eid;
+  if(myRecoListeners.has(key)) return;
+  myRecoListeners.add(key);
+  onValue(ref(db, cpath('courseRecoveries/'+cid+'/'+eid)), s=>{
+    (state.courseRecoveries[cid] = state.courseRecoveries[cid] || {})[eid] = s.val()||{};
+    renderCurrent();
+  }, err=>console.error('myRecoveries', err));
 }
 const recoveryListeners = new Set();
 function loadCourseRecoveries(cid){
@@ -2111,6 +2273,7 @@ function countRecurringOccurrences(r, periodStartDate, periodEndDate){
 /* ================= Vista Corsi ================= */
 function renderCorsiScreen(host){
   if(state.isAdmin && state.corsiView==='pagamenti'){ renderPaymentsScreen(host); return; }
+  if(state.isAdmin && state.corsiView==='incassi'){ renderIncassiScreen(host); return; }
   const canSeeAllCourses = state.isAdmin || state.isTeacher;
   const courseList = Object.entries(state.courses||{})
     .filter(([cid])=> canSeeAllCourses || state.myEnrollments[cid])
@@ -2222,6 +2385,16 @@ function renderCorsiScreen(host){
     const c = state.courses[cid]; if(!c) return null;
     const eid = state.myEnrollments[cid];
     const payMap = (state.coursePayments[cid]||{})[eid] || {};
+    const myEid2 = state.myEnrollments[cid];
+    loadCourseAttendanceAll(cid); loadMyRecoveries(cid, myEid2);
+    let statsHtml = '';
+    if(state.courseAttendanceByCourse[cid] !== undefined && myEid2){
+      let presences = 0;
+      Object.values(state.courseAttendanceByCourse[cid]||{}).forEach(dm=>{ if(dm && dm[myEid2]===true) presences++; });
+      const bl = enrolleeBacklog(cid, myEid2);
+      statsHtml = `<div class="list-row"><span>Presenze</span><span class="pill">${presences}</span></div>
+        <div class="list-row" style="flex-wrap:wrap;gap:4px 8px;"><span>Assenze</span><span class="pill" style="${bl.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${bl.absences} · recuperate ${bl.recovered} · da recuperare ${bl.owed}</span></div>`;
+    }
     const billing = (state.myEnrollmentData[cid]||{}).billing;
     const sum = courseDueSummary(c, payMap, billing);
     totalDue += sum.dueAmount;
@@ -2229,7 +2402,7 @@ function renderCorsiScreen(host){
       const st = blockStatus(payMap, blk);
       return st==='mixed' ? blk.map(m=>acctRow(fmtMonth(m), payStatus(payMap,m))).join('') : acctRow(fmtBlock(blk), st);
     }).join('') : '<div class="hint">Nessun pagamento ancora dovuto.</div>';
-    return { name:c.name, fee:c.monthlyFee, billing, rowsHtml };
+    return { name:c.name, fee:c.monthlyFee, billing, rowsHtml, statsHtml };
   }).filter(Boolean);
 
   const acctCard = document.createElement('div');
@@ -2240,6 +2413,7 @@ function renderCorsiScreen(host){
     ${courseRows.map(cr=>`
       <div style="margin-top:10px;">
         <div class="hint" style="margin-bottom:4px;"><b style="color:var(--chalk);">${esc(cr.name)}</b> · € ${cr.fee}/mese · ${cr.billing==='monthly'?'pagamento mensile':'pagamento bimestrale (€ '+fmtEuro((Number(cr.fee)||0)*2)+' ogni 2 mesi)'}</div>
+        ${cr.statsHtml||''}
         ${cr.rowsHtml}
       </div>
     `).join('')}
@@ -2268,6 +2442,17 @@ function renderCorsiScreen(host){
     if(nl) loadMyAttendance(cid, nl.date, myEid);
     const myStatus = nl ? state.myAttendance[cid+'|'+nl.date] : undefined;
     const canDeclare = !!nl && nowDate() < attendanceCutoff(nl.date, nl.hour);
+    const row1 = [], row2 = [];
+    if(state.isAdmin) row1.push(`<button class="btn-ghost" data-act="enroll" data-cid="${cid}">Iscritti</button>`);
+    if(state.isAdmin || isMyCourse){
+      row1.push(`<button class="btn-clay" data-act="attendance" data-cid="${cid}">Presenze</button>`);
+      row1.push(`<button class="btn-ghost" data-act="absences" data-cid="${cid}">Assenze</button>`);
+    }
+    if(state.isAdmin){
+      row2.push(`<button class="btn-ghost" data-act="editcourse" data-cid="${cid}">Modifica</button>`);
+      row2.push(`<button class="btn-ghost" data-act="delcourse" data-cid="${cid}" style="color:var(--danger);border-color:var(--danger);">Elimina</button>`);
+    }
+    const actionsHtml = [row1,row2].filter(r=>r.length).map(r=>`<div class="course-actions" style="grid-template-columns:repeat(${r.length},minmax(0,1fr));">${r.join('')}</div>`).join('');
 
     card.innerHTML = `
       <div class="section-title">${c.name} ${(c.livello && (state.isAdmin||isMyCourse))?`<span class="pill" style="padding:2px 8px;">${c.livello}</span>`:''}</div>
@@ -2285,13 +2470,7 @@ function renderCorsiScreen(host){
           <div class="hint" style="margin-top:6px;">Puoi inviare o cambiare la risposta fino alle ${ATTENDANCE_CUTOFF_HOUR}:00 del giorno della lezione.</div>`
         : `<div class="hint">${myStatus===true?'✓ Hai confermato la presenza.':(myStatus===false?'Hai segnalato che non ci sarai.':'Non hai inviato la presenza.')} Le risposte sono chiuse: per cambiare rivolgiti al maestro.</div>`}
       </div>` : ''}
-      <div class="btn-row" style="margin-top:10px;">
-        ${(state.isAdmin) ? `<button class="btn-ghost" data-act="enroll" data-cid="${cid}">Iscritti</button>` : ''}
-        ${(state.isAdmin || isMyCourse) ? `<button class="btn-clay" data-act="attendance" data-cid="${cid}">Presenze</button>` : ''}
-        ${(state.isAdmin || isMyCourse) ? `<button class="btn-ghost" data-act="absences" data-cid="${cid}">Assenze</button>` : ''}
-        ${state.isAdmin ? `<button class="btn-ghost" data-act="editcourse" data-cid="${cid}">Modifica</button>` : ''}
-        ${state.isAdmin ? `<button class="small-btn" data-act="delcourse" data-cid="${cid}">Elimina</button>` : ''}
-      </div>
+      ${actionsHtml}
       <div class="course-detail" id="detail-${cid}"></div>
     `;
     cardsHost.appendChild(card);
@@ -2542,26 +2721,15 @@ function renderCorsiScreen(host){
         box.style.marginTop = '12px'; box.style.borderTop='1px solid var(--line)'; box.style.paddingTop='12px';
         box.innerHTML = `
           <div class="section-title">Assenze — ${course.name} (${course.livello||''})</div>
-          <div class="hint" style="margin-bottom:8px;">Ordinati per ore ancora da recuperare (assenze meno recuperi confermati dal maestro).</div>
+          <div class="hint" style="margin-bottom:8px;">Ordinati per ore ancora da recuperare (assenze meno recuperi confermati dal maestro). Per invitare un corsista al recupero usa la scheda Maestro → Presenze e recuperi.</div>
           <div id="absenceList-${cid}"></div>
         `;
         detailHost.appendChild(box);
         const listHost = box.querySelector('#absenceList-'+cid);
         if(!stats.length){ listHost.innerHTML = `<div class="hint">Nessun dato di presenza ancora registrato.</div>`; }
         stats.forEach(st=>{
-          const row = document.createElement('div'); row.className='list-row';
+          const row = document.createElement('div'); row.className='list-row'; row.style.flexWrap='wrap'; row.style.gap='4px 8px';
           row.innerHTML = `<span>${esc(st.e.name)}</span><span class="pill" style="${st.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${st.absences} assenze · ${st.recovered} recuperate · ${st.presences} presenze</span>`;
-          if(st.owed>0 && st.e.phone){
-            const waBtn = document.createElement('button');
-            waBtn.className='small-btn'; waBtn.style.padding='6px 10px'; waBtn.style.fontSize='11px';
-            waBtn.textContent = 'Invita al recupero';
-            waBtn.onclick = () => {
-              const digits = normalizePhone(st.e.phone);
-              const msg = `Ciao ${st.e.name}, dal ${CLUB_NAME}: hai ${st.owed} ${st.owed===1?'lezione':'lezioni'} da recuperare nel corso "${course.name}" (livello ${course.livello||'-'}). Ti va di recuperare una lezione? Facci sapere quando sei disponibile!`;
-              window.open(`https://wa.me/${digits}?text=${encodeURIComponent(msg)}`, '_blank');
-            };
-            row.appendChild(waBtn);
-          }
           listHost.appendChild(row);
         });
       }
@@ -2639,25 +2807,8 @@ function renderMaestroScreen(host){
 
   const myCourses = Object.entries(state.courses||{}).filter(([_,c])=>c.teacherUid===state.uid);
 
-  // Recuperi suggeriti, solo per i corsi che questo maestro tiene
   myCourses.forEach(([cid])=>{ loadCourseEnrollments(cid); loadCourseAttendanceAll(cid); });
   Object.keys(state.courses||{}).forEach(id=>loadCourseRecoveries(id));
-  const absenceThresholdMaestro = (state.club && state.club.absenceThreshold) || 2;
-  const recuperiSuggeriti = [];
-  myCourses.forEach(([cid,c])=>{
-    const enrollments = Object.entries(state.courseEnrollments[cid]||{});
-    const history = state.courseAttendanceByCourse[cid] || {};
-    enrollments.forEach(([eid,e])=>{
-      const absences = enrolleeBacklog(cid, eid).owed;
-      if(absences >= absenceThresholdMaestro){
-        const alt = Object.entries(state.courses||{}).find(([cid2,c2])=>
-          cid2!==cid && c2.livello===c.livello && (c2.enrolledCount||0) < c2.maxSeats
-        );
-        recuperiSuggeriti.push({ cid, course: c, eid, student: e, absences, alt: alt ? alt[1] : null });
-      }
-    });
-  });
-  recuperiSuggeriti.sort((a,b)=>b.absences-a.absences);
 
   let weekHours = 0, weekRevenue = 0;
   const dayData = weekDays.map(dateStr=>{
@@ -2696,12 +2847,6 @@ function renderMaestroScreen(host){
     <div id="daysHost"></div>
     <div class="hint">Le quote dei corsi sono mensili e vengono gestite dall'admin nella tab Corsi — qui vedi solo gli orari.</div>
 
-    ${myCourses.length ? `
-    <div class="card">
-      <div class="section-title">Recuperi suggeriti (${recuperiSuggeriti.length})</div>
-      <div class="hint" style="margin-bottom:8px;">Corsisti dei tuoi corsi con almeno ${absenceThresholdMaestro} ore da recuperare, con un corso alternativo dello stesso livello e posti liberi (se esiste).</div>
-      <div id="recuperiList">${recuperiSuggeriti.length ? '' : '<div class="hint">Nessun recupero da proporre al momento.</div>'}</div>
-    </div>` : ''}
   `;
   host.replaceChildren(screen);
 
@@ -2735,6 +2880,24 @@ function renderMaestroScreen(host){
       const row = document.createElement('div'); row.className='list-row';
       row.innerHTML = `<span>${String(s.hour).padStart(2,'0')}:00 · ${s.courtName} · ${s.courseName} <span class="pill" style="padding:2px 7px;">corso</span></span><span class="pill">${s.enrolled} iscritti</span>`;
       sessionsHost.appendChild(row);
+      {
+        const enr = Object.entries(state.courseEnrollments[s.cid]||{});
+        const dayAtt = (state.courseAttendanceByCourse[s.cid]||{})[d.dateStr] || {};
+        const names = (test)=>enr.filter(([eid])=>test(dayAtt[eid])).map(([_,e])=>esc(e.name||'—')).join(', ');
+        const pres = enr.filter(([eid])=>dayAtt[eid]===true).length;
+        const abs = enr.filter(([eid])=>dayAtt[eid]===false).length;
+        const none = enr.length - pres - abs;
+        const guests = lessonRecoveries(s.cid, d.dateStr);
+        const lines = [];
+        if(pres) lines.push(`<div><span class="pill" style="color:var(--ball);border-color:var(--ball);">Presenti (${pres})</span>${names(v=>v===true)}</div>`);
+        if(abs) lines.push(`<div><span class="pill" style="color:var(--danger);border-color:var(--danger);">Assenti (${abs})</span>${names(v=>v===false)}</div>`);
+        if(none>0 && enr.length) lines.push(`<div><span class="pill">Senza risposta (${none})</span>${names(v=>v===undefined)}</div>`);
+        if(guests.length) lines.push(`<div><span class="pill">Recuperi (${guests.length})</span>${guests.map(g=>esc(g.rec.name||'—')+' ('+(g.rec.status==='present'?'presente':(g.rec.status==='absent'?'assente':'proposto'))+')').join(', ')}</div>`);
+        if(lines.length){
+          const blk = document.createElement('div'); blk.className = 'cal-att'; blk.innerHTML = lines.join('');
+          sessionsHost.appendChild(blk);
+        }
+      }
       const hl = lessonHoles(s.cid, d.dateStr);
       const rs = state.recoverySession;
       const isOpen = !!rs && rs.cid===s.cid && rs.date===d.dateStr && rs.hour===s.hour;
@@ -2755,29 +2918,6 @@ function renderMaestroScreen(host){
       }
     });
   });
-
-  const recuperiHost = screen.querySelector('#recuperiList');
-  if(recuperiHost){
-    recuperiSuggeriti.forEach(r=>{
-      const row = document.createElement('div'); row.className='list-row';
-      row.innerHTML = `<span>${r.student.name} · ${r.course.name} (${r.absences} ore da recuperare)${r.alt?' · consigliato: '+r.alt.name:' · nessun corso alternativo dello stesso livello con posti liberi'}</span>`;
-      if(r.student.phone){
-        const waBtn = document.createElement('button');
-        waBtn.className='small-btn'; waBtn.style.padding='6px 10px'; waBtn.style.fontSize='11px';
-        waBtn.textContent = 'Invita';
-        waBtn.onclick = () => {
-          const digits = normalizePhone(r.student.phone);
-          const altText = r.alt
-            ? `Ti proponiamo di recuperare nel corso "${r.alt.name}" (${r.alt.livello||''}).`
-            : `Contattaci per trovare insieme l'orario migliore per recuperare.`;
-          const msg = `Ciao ${r.student.name}, dal ${CLUB_NAME}: hai ${r.absences} ${r.absences===1?'lezione':'lezioni'} da recuperare nel corso "${r.course.name}" (${r.course.livello||''}). ${altText}`;
-          window.open(`https://wa.me/${digits}?text=${encodeURIComponent(msg)}`, '_blank');
-        };
-        row.appendChild(waBtn);
-      }
-      recuperiHost.appendChild(row);
-    });
-  }
 }
 
 /* ================= Vista Registro (super admin, nascosta) ================= */
@@ -3208,7 +3348,6 @@ function renderAdminScreen(host){
       <div class="section-title">Notifica WhatsApp per ore liberate</div>
       <div class="hint" style="margin-bottom:8px;">Quando annulli una prenotazione dall'elenco qui sopra, potrai inviare un messaggio pronto al tuo gruppo WhatsApp con i dettagli dell'ora liberata.</div>
       <div class="field"><label>Nome gruppo WhatsApp (promemoria, WhatsApp non permette di sceglierlo dall'app)</label><input id="waGroupName" value="${state.club.whatsappGroupName||''}" placeholder="Es. Soci TC Lello de Mita"></div>
-      <div class="field"><label>Soglia assenze per suggerire un recupero</label><input id="waThreshold" type="number" min="1" value="${absenceThreshold}"></div>
       <div class="field"><label>Messaggio predefinito</label>
         <textarea id="waTemplate" rows="4" style="width:100%;background:var(--board);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:10px;font-family:var(--font-body);font-size:14px;">${state.club.whatsappTemplate||"Si è liberato un campo: {giorno} {data} alle {ora} su {campo}. Chi fosse interessato può prenotarlo sull'app!"}</textarea>
       </div>
@@ -3567,9 +3706,8 @@ function renderAdminScreen(host){
   screen.querySelector('#saveWaBtn').onclick = async () => {
     const template = screen.querySelector('#waTemplate').value.trim();
     const groupName = screen.querySelector('#waGroupName').value.trim();
-    const threshold = parseInt(screen.querySelector('#waThreshold').value,10) || 2;
     try{
-      await update(ref(db, cpath('info')), { whatsappTemplate: template, whatsappGroupName: groupName, absenceThreshold: threshold });
+      await update(ref(db, cpath('info')), { whatsappTemplate: template, whatsappGroupName: groupName });
       toast('Impostazioni salvate');
     }catch(e){ toast('Errore: '+e.message); }
   };
