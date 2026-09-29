@@ -72,6 +72,36 @@
   .avatar-initials{width:34px;height:34px;border-radius:50%;background:var(--ball-dim);color:#16220F;display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-size:14px;flex-shrink:0;}
   .avatar-lg{width:88px;height:88px;border-radius:50%;object-fit:cover;background:var(--board);border:1px solid var(--line);}
   .avatar-lg-initials{width:88px;height:88px;border-radius:50%;background:var(--ball-dim);color:#16220F;display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-size:32px;}
+  .seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;}
+  .seg button{flex:1;padding:10px 6px;background:transparent;color:var(--ink-dim);border:none;border-right:1px solid var(--line);font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.05em;cursor:pointer;}
+  .seg button:last-child{border-right:none;}
+  .seg button.active{background:var(--ball);color:#16220F;}
+  .picker-list{display:none;margin-top:6px;background:var(--board);border:1px solid var(--line);border-radius:8px;max-height:230px;overflow-y:auto;}
+  .picker.open .picker-list{display:block;}
+  .picker-opt{padding:11px 12px;font-size:15px;border-bottom:1px solid var(--line);cursor:pointer;}
+  .picker-opt:last-child{border-bottom:none;}
+  .picker-opt.sel{color:var(--ball);}
+  .picker-opt.muted{color:var(--ink-dim);}
+  .picker-empty{padding:11px 12px;font-size:13px;color:var(--ink-dim);}
+  .pay-row{border-bottom:1px solid var(--line);padding:10px 0;}
+  .pay-row:last-child{border-bottom:none;}
+  .pay-head{display:flex;justify-content:space-between;align-items:center;gap:10px;cursor:pointer;}
+  .pay-name{font-size:15px;color:var(--chalk);}
+  .pay-detail{margin-top:8px;padding:10px;background:var(--board);border:1px solid var(--line);border-radius:8px;}
+  .pay-month{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;flex-wrap:wrap;}
+  .pay-opts{display:flex;gap:6px;}
+  .small-btn.on-due{border-color:var(--danger);color:var(--danger);}
+  .small-btn.on-paid{background:var(--ball);border-color:var(--ball);color:#16220F;}
+  .small-btn.on-exempt{border-color:var(--ball);color:var(--ball);}
+  .reco-panel{margin:8px 0 12px;padding:12px;border:1px solid var(--ball-dim);border-radius:10px;background:var(--board);}
+  .reco-scroll{max-height:52vh;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:0 10px;}
+  .reco-row{padding:10px 0;border-bottom:1px solid var(--line);}
+  .reco-row:last-child{border-bottom:none;}
+  .reco-row.skipped{opacity:.55;}
+  .reco-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;}
+  .pw-wrap{position:relative;width:100%;}
+  .pw-wrap input{padding-right:84px;}
+  .pw-toggle{position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--ball);font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.05em;padding:8px;cursor:pointer;}
   .link{color:var(--ball);background:none;border:none;font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.05em;padding:4px 0;text-decoration:underline;cursor:pointer;}
   .member-row,.list-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--line);gap:10px;}
   .member-row:last-child,.list-row:last-child{border-bottom:none;}
@@ -386,14 +416,14 @@ function renderProfileModal(){
       <input type="file" accept="image/*" id="photoInput" style="display:none;">
       <button class="btn-ghost" id="pickPhotoBtn">Cambia foto</button>
       <div class="field"><label>Nome e cognome</label><input id="profName" value="${meObj.name||''}"></div>
-      <div class="field"><label>Cellulare</label><input id="profPhone" type="tel" value="${meObj.phone||''}" placeholder="Es. 333 1234567"></div>
+      <div class="field"><label>Cellulare (obbligatorio)</label><input id="profPhone" type="tel" value="${meObj.phone||''}" placeholder="Es. 333 1234567"></div>
       <div class="btn-row">
         <button class="btn-ghost" id="closeProfile">Chiudi</button>
         <button class="btn-primary" id="saveProfile">Salva</button>
       </div>
       <div class="section-title" style="margin-top:6px;">Cambia password</div>
-      <div class="field"><label>Password attuale</label><input id="curPass" type="password" autocomplete="current-password"></div>
-      <div class="field"><label>Nuova password</label><input id="newPass" type="password" autocomplete="new-password" placeholder="Almeno 6 caratteri"></div>
+      <div class="field"><label>Password attuale</label>${pwField('curPass','','current-password')}</div>
+      <div class="field"><label>Nuova password</label>${pwField('newPass','Almeno 6 caratteri','new-password')}</div>
       <div id="passErr"></div>
       <button class="btn-ghost" id="changePassBtn" style="width:100%;">Aggiorna password</button>
     </div>`;
@@ -418,6 +448,7 @@ function renderProfileModal(){
     const name = overlay.querySelector('#profName').value.trim();
     const phone = overlay.querySelector('#profPhone').value.trim();
     if(!name){ toast('Il nome non può essere vuoto'); return; }
+    if(!isValidPhone(phone)){ toast('Il numero di cellulare è obbligatorio'); return; }
     const updates = { name, phone: phone||null };
     if(previewHost.dataset.pendingPhoto) updates.photoUrl = previewHost.dataset.pendingPhoto;
     try{
@@ -487,6 +518,32 @@ const state = {
   customTo: todayKey(),
   openCourseId: null,
   attendanceCourseId: null,
+  selectedCourseId: null,
+  editCourseId: null,
+  showCourseForm: false,
+  courseForm: null,
+  pickers: {},
+  enrollDraft: {},
+  enrollSearchText: {},
+  payLoaded: {},
+  corsiView: 'corsi',
+  payFilter: 'due',
+  payCourse: '',
+  payQuery: '',
+  paySort: 'az',
+  payLimit: 30,
+  payExpanded: {},
+  paySplit: {},
+  myEnrollmentData: {},
+  courseRecoveries: {},
+  myAttendance: {},
+  recoverySession: null,
+  recoLimit: 15,
+  recoScroll: 0,
+  recoSearch: '',
+  recoAll: false,
+  recoSkipped: {},
+  debugNow: null,
   attendanceDate: null,
   paymentMonth: currentYearMonth(),
   draftSessions: [{ weekday: 1, hour: OPEN_HOUR, courtId: null }],
@@ -591,9 +648,9 @@ function renderInviteScreen(){
       <div class="screen">
         <div class="hint">Il circolo ti ha già registrato come socio. Completa qui il tuo account per collegarti al tuo profilo.</div>
         <div class="card" style="display:flex;flex-direction:column;gap:12px;">
-          <div class="field"><label>Cellulare (opzionale)</label><input id="invitePhone" type="tel" placeholder="Es. 333 1234567"></div>
+          <div class="field"><label>Cellulare (obbligatorio)</label><input id="invitePhone" type="tel" placeholder="Es. 333 1234567"></div>
           <div class="field"><label>Email</label><input id="inviteEmail" type="email" placeholder="tuaemail@esempio.it" autocomplete="email"></div>
-          <div class="field"><label>Password</label><input id="invitePass" type="password" placeholder="Almeno 6 caratteri" autocomplete="new-password"></div>
+          <div class="field"><label>Password</label>${pwField('invitePass','Almeno 6 caratteri','new-password')}</div>
           <div id="inviteErr"></div>
           <button class="btn-primary" id="inviteSubmit">Crea il tuo account</button>
         </div>
@@ -605,6 +662,7 @@ function renderInviteScreen(){
       const errBox = document.getElementById('inviteErr');
       errBox.innerHTML = '';
       if(!email || !pass){ errBox.innerHTML = `<div class="error-box">Inserisci email e password.</div>`; return; }
+      if(!isValidPhone(phone)){ errBox.innerHTML = `<div class="error-box">Il numero di cellulare è obbligatorio.</div>`; return; }
       try{
         const cred = await createUserWithEmailAndPassword(auth, email, pass);
         const existingSnap = await get(ref(db, cpath('members/'+mid)));
@@ -624,6 +682,652 @@ function renderInviteScreen(){
   });
 }
 
+/* ================= Helper: testo, picker con ricerca, pagamenti corsi ================= */
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function normTxt(s){ return String(s==null?'':s).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
+function fmtEuro(n){ n = Math.round((Number(n)||0)*100)/100; return Number.isInteger(n) ? String(n) : n.toFixed(2); }
+
+/* Menu a tendina con ricerca: lo stato (valore, testo cercato, aperto/chiuso) vive in state.pickers,
+   quindi sopravvive ai re-render causati dagli aggiornamenti di Firebase. */
+function makePicker(key, items, opts){
+  opts = opts || {};
+  if(!state.pickers[key]) state.pickers[key] = { value: opts.initial || '', q:'', open:false };
+  const st = state.pickers[key];
+  const wrap = document.createElement('div');
+  wrap.className = 'picker' + (st.open ? ' open' : '');
+  wrap.dataset.key = key;
+  wrap.innerHTML = '<input class="picker-input" id="picker-'+key+'" type="text" autocomplete="off" autocapitalize="off" spellcheck="false"><div class="picker-list"></div>';
+  const input = wrap.querySelector('input');
+  const list = wrap.querySelector('.picker-list');
+  const noneText = opts.noneLabel || '';
+  const labelOf = v => { const it = items.find(i=>i.value===v); return it ? it.label : ''; };
+  function syncInput(){
+    if(st.open){
+      input.value = st.q;
+      input.placeholder = st.value ? labelOf(st.value) : (opts.placeholder || 'Cerca…');
+    } else {
+      input.value = st.value ? labelOf(st.value) : '';
+      input.placeholder = noneText || opts.placeholder || 'Cerca…';
+    }
+  }
+  function choose(v){
+    st.value = v; st.open = false; st.q = '';
+    wrap.classList.remove('open'); syncInput(); input.blur();
+    if(opts.onChange) opts.onChange(v);
+  }
+  function paintList(){
+    const n = normTxt(st.q.trim());
+    const matches = items.filter(i => !n || normTxt(i.label).includes(n));
+    list.innerHTML = '';
+    if(noneText && !n){
+      const o = document.createElement('div');
+      o.className = 'picker-opt muted' + (!st.value ? ' sel' : '');
+      o.textContent = noneText; o.onclick = () => choose('');
+      list.appendChild(o);
+    }
+    if(!matches.length){
+      const e = document.createElement('div'); e.className = 'picker-empty'; e.textContent = 'Nessun risultato';
+      list.appendChild(e); return;
+    }
+    matches.slice(0,50).forEach(it=>{
+      const o = document.createElement('div');
+      o.className = 'picker-opt' + (it.value===st.value ? ' sel' : '');
+      o.textContent = it.label; o.onclick = () => choose(it.value);
+      list.appendChild(o);
+    });
+    if(matches.length > 50){
+      const m = document.createElement('div'); m.className = 'picker-empty';
+      m.textContent = 'Altri '+(matches.length-50)+' risultati: continua a scrivere per restringere';
+      list.appendChild(m);
+    }
+  }
+  wrap._close = () => { st.open = false; st.q = ''; wrap.classList.remove('open'); syncInput(); };
+  input.addEventListener('focus', ()=>{ if(!st.open){ st.open = true; st.q = ''; } wrap.classList.add('open'); syncInput(); paintList(); });
+  input.addEventListener('input', ()=>{ st.q = input.value; st.open = true; wrap.classList.add('open'); paintList(); });
+  syncInput();
+  if(st.open) paintList();
+  return wrap;
+}
+document.addEventListener('click', (e)=>{
+  document.querySelectorAll('.picker.open').forEach(w=>{ if(!w.contains(e.target) && w._close) w._close(); });
+});
+
+/* Pagamenti corsi: true = pagato, 'esente' = mese non dovuto (solo admin), altro = da pagare.
+   I mesi dovuti di default sono tutti quelli dall'inizio del corso al mese corrente. */
+const PAY_EXEMPT = 'esente';
+function payStatus(payMap, m){ const v = payMap ? payMap[m] : undefined; return v===true ? 'paid' : (v===PAY_EXEMPT ? 'exempt' : 'due'); }
+function addMonthsYM(ym, n){ let [y,m] = ym.split('-').map(Number); m += n; while(m>12){ m-=12; y++; } return y+'-'+String(m).padStart(2,'0'); }
+/* Blocchi di pagamento: bimestrale (default) = 2 mesi insieme, dovuti dal primo mese del blocco;
+   mensile = un mese per volta. Ultimo blocco del corso: può avere un solo mese. */
+function billingBlocks(course, billing){
+  if(!course.startDate || !course.endDate) return [];
+  const endYM = course.endDate.slice(0,7), nowYM = currentYearMonth();
+  const out = [];
+  let ym = course.startDate.slice(0,7);
+  const step = billing==='monthly' ? 1 : 2;
+  while(ym <= endYM && ym <= nowYM){
+    const blk = [ym];
+    if(step===2){ const nx = addMonthsYM(ym,1); if(nx <= endYM) blk.push(nx); }
+    out.push(blk);
+    ym = addMonthsYM(ym, step);
+  }
+  return out;
+}
+function fmtBlock(ms){ return ms.length===1 ? fmtMonth(ms[0]) : fmtMonth(ms[0])+' – '+fmtMonth(ms[ms.length-1]); }
+function blockStatus(payMap, blk){
+  const set = new Set(blk.map(m=>payStatus(payMap, m)));
+  return set.size===1 ? [...set][0] : 'mixed';
+}
+function courseDueSummary(course, payMap, billing){
+  const fee = Number(course.monthlyFee)||0;
+  const blocks = billingBlocks(course, billing);
+  const months = blocks.flat();
+  const s = { blocks, months, due:0, paid:0, exempt:0, dueMonths:[], fee, billing: billing==='monthly' ? 'monthly' : 'bimonthly' };
+  months.forEach(m=>{
+    const st = payStatus(payMap, m);
+    if(st==='paid') s.paid++; else if(st==='exempt') s.exempt++; else { s.due++; s.dueMonths.push(m); }
+  });
+  s.dueAmount = s.due*fee; s.paidAmount = s.paid*fee;
+  return s;
+}
+function payPill(s){
+  if(s.due>0) return { label:'Da pagare € '+fmtEuro(s.dueAmount), style:'color:var(--danger);border-color:var(--danger);' };
+  if(!s.months.length) return { label:'Non ancora dovuto', style:'color:var(--ink-dim);' };
+  if(s.paid===0) return { label:'Esente', style:'' };
+  return { label:'Pagato', style:'' };
+}
+async function setPaymentBlock(cid, eid, months, status){
+  const v = status==='paid' ? true : (status==='exempt' ? PAY_EXEMPT : false);
+  const obj = {}; months.forEach(m=>{ obj[m] = v; });
+  try{ await update(ref(db, cpath('coursePayments/'+cid+'/'+eid)), obj); }
+  catch(err){ toast('Errore: '+err.message); }
+}
+async function setBilling(cid, eid, mode){
+  try{ await update(ref(db, cpath('courseEnrollments/'+cid+'/'+eid)), { billing: mode==='monthly' ? 'monthly' : null }); }
+  catch(err){ toast('Errore: '+err.message); }
+}
+
+/* Dettaglio pagamenti di un corsista (solo admin): modalità, blocchi da pagare, azioni rapide */
+function buildPayDetail(r, repaint){
+  const s = r.s;
+  const monthly = r.e.billing === 'monthly';
+  const det = document.createElement('div');
+  det.className = 'pay-detail';
+  const info = document.createElement('div');
+  info.className = 'hint'; info.style.marginBottom = '6px';
+  info.textContent = 'Quota € '+fmtEuro(s.fee)+'/mese'+(monthly ? '' : ' · € '+fmtEuro(s.fee*2)+' ogni 2 mesi')+(r.e.phone ? ' · '+r.e.phone : '');
+  det.appendChild(info);
+  const lab = document.createElement('div');
+  lab.className = 'hint'; lab.textContent = 'Modalità di pagamento';
+  det.appendChild(lab);
+  const seg = document.createElement('div');
+  seg.className = 'seg'; seg.style.margin = '4px 0 10px';
+  [['bimonthly','Bimestrale'],['monthly','Mensile']].forEach(([k,txt])=>{
+    const isOn = (k==='monthly') === monthly;
+    const b = document.createElement('button');
+    b.textContent = txt; b.className = isOn ? 'active' : '';
+    b.onclick = () => { if(!isOn) setBilling(r.cid, r.eid, k); };
+    seg.appendChild(b);
+  });
+  det.appendChild(seg);
+  if(!s.blocks.length){
+    const h = document.createElement('div'); h.className = 'hint'; h.textContent = 'Nessun pagamento ancora dovuto.';
+    det.appendChild(h);
+  }
+  const optsFor = (months, cur) => {
+    const wrap = document.createElement('div'); wrap.className = 'pay-opts';
+    [['due','Da pagare'],['paid','Pagato'],['exempt','Esente']].forEach(([k,txt])=>{
+      const b = document.createElement('button');
+      b.className = 'small-btn' + (cur===k ? ' on-'+k : '');
+      b.textContent = txt;
+      b.onclick = () => { if(cur!==k) setPaymentBlock(r.cid, r.eid, months, k); };
+      wrap.appendChild(b);
+    });
+    return wrap;
+  };
+  s.blocks.forEach(blk=>{
+    const st = blockStatus(r.payMap, blk);
+    const splitKey = r.key+'|'+blk[0];
+    const split = blk.length>1 && (st==='mixed' || state.paySplit[splitKey]);
+    if(!split){
+      const line = document.createElement('div'); line.className = 'pay-month';
+      const l = document.createElement('span');
+      l.textContent = fmtBlock(blk)+' · € '+fmtEuro(blk.length*s.fee);
+      line.appendChild(l);
+      line.appendChild(optsFor(blk, st));
+      det.appendChild(line);
+      if(blk.length>1){
+        const lk = document.createElement('button');
+        lk.className = 'link'; lk.style.cssText = 'font-size:12px;padding:0 0 6px;';
+        lk.textContent = 'Gestisci per mese (eccezioni)';
+        lk.onclick = () => { state.paySplit[splitKey] = true; repaint(); };
+        det.appendChild(lk);
+      }
+    } else {
+      const head = document.createElement('div'); head.className = 'hint'; head.style.marginTop = '4px';
+      head.textContent = fmtBlock(blk);
+      det.appendChild(head);
+      blk.forEach(m=>{
+        const line = document.createElement('div'); line.className = 'pay-month';
+        const l = document.createElement('span'); l.textContent = fmtMonth(m)+' · € '+fmtEuro(s.fee);
+        line.appendChild(l);
+        line.appendChild(optsFor([m], payStatus(r.payMap, m)));
+        det.appendChild(line);
+      });
+      if(st!=='mixed'){
+        const lk = document.createElement('button');
+        lk.className = 'link'; lk.style.cssText = 'font-size:12px;padding:0 0 6px;';
+        lk.textContent = 'Torna al blocco unico';
+        lk.onclick = () => { delete state.paySplit[splitKey]; repaint(); };
+        det.appendChild(lk);
+      }
+    }
+  });
+  if(s.due>0){
+    const acts = document.createElement('div');
+    acts.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;';
+    const allBtn = document.createElement('button');
+    allBtn.className = 'btn-ghost'; allBtn.style.cssText = 'flex:1;padding:9px 10px;font-size:12px;';
+    allBtn.textContent = 'Segna tutto pagato';
+    allBtn.onclick = () => setPaymentBlock(r.cid, r.eid, s.dueMonths, 'paid');
+    acts.appendChild(allBtn);
+    if(r.e.phone){
+      const wa = document.createElement('button');
+      wa.className = 'btn-ghost'; wa.style.cssText = 'flex:1;padding:9px 10px;font-size:12px;';
+      wa.textContent = 'Sollecita su WhatsApp';
+      const dueLabel = s.blocks
+        .map(b=>b.filter(m=>payStatus(r.payMap,m)==='due'))
+        .filter(b=>b.length)
+        .map(fmtBlock).join(', ');
+      wa.onclick = () => window.open(buildWhatsAppReminderUrl(r.e.phone, r.name, r.c.name, dueLabel, fmtEuro(s.dueAmount)), '_blank');
+      acts.appendChild(wa);
+    }
+    det.appendChild(acts);
+  }
+  return det;
+}
+
+async function setPayment(cid, eid, m, status){
+  const v = status==='paid' ? true : (status==='exempt' ? PAY_EXEMPT : false);
+  try{ await set(ref(db, cpath('coursePayments/'+cid+'/'+eid+'/'+m)), v); }
+  catch(err){ toast('Errore: '+err.message); }
+}
+
+function corsiSwitchHtml(){
+  return '<div class="seg" id="corsiSwitch"><button data-v="corsi" class="'+(state.corsiView!=='pagamenti'?'active':'')+'">Corsi</button><button data-v="pagamenti" class="'+(state.corsiView==='pagamenti'?'active':'')+'">Pagamenti</button></div>';
+}
+function bindCorsiSwitch(scope){
+  scope.querySelectorAll('#corsiSwitch button').forEach(b=>{ b.onclick = ()=>{ state.corsiView = b.dataset.v; renderApp(); }; });
+}
+
+/* Lista completa dei corsisti con stato pagamenti (solo admin) */
+function renderPaymentsScreen(host){
+  if(!state.isAdmin){ state.corsiView = 'corsi'; return renderCorsiScreen(host); }
+  const courses = Object.entries(state.courses||{}).sort((a,b)=>String(a[1].name||'').localeCompare(String(b[1].name||''),'it'));
+  courses.forEach(([cid])=>{ loadCourseEnrollments(cid); loadCoursePaymentsForCourse(cid); });
+  if(state.payCourse && !state.courses[state.payCourse]) state.payCourse = '';
+  const loadedCount = courses.filter(([cid])=> state.courseEnrollments[cid]!==undefined && state.payLoaded[cid]).length;
+
+  const screen = document.createElement('div');
+  screen.className = 'screen';
+  screen.innerHTML = `
+    ${corsiSwitchHtml()}
+    <div id="payHead"></div>
+    <div class="card" style="display:flex;flex-direction:column;gap:10px;">
+      <div class="seg" id="payChips"></div>
+      <div class="field"><input id="paySearch" type="text" placeholder="Cerca corsista…" autocomplete="off" value="${esc(state.payQuery)}"></div>
+      <div style="display:flex;gap:10px;">
+        <div class="field" style="flex:1;min-width:0;"><label>Corso</label>
+          <select id="payCourse"><option value="">Tutti i corsi</option>${courses.map(([cid,c])=>`<option value="${cid}" ${cid===state.payCourse?'selected':''}>${esc(c.name)}</option>`).join('')}</select></div>
+        <div class="field" style="flex:1;min-width:0;"><label>Ordina</label>
+          <select id="paySort"><option value="az" ${state.paySort==='az'?'selected':''}>Nome A–Z</option><option value="due" ${state.paySort==='due'?'selected':''}>Più da pagare</option></select></div>
+      </div>
+    </div>
+    <div class="card" id="payList"></div>`;
+  host.replaceChildren(screen);
+  bindCorsiSwitch(screen);
+
+  const head = screen.querySelector('#payHead');
+  const chips = screen.querySelector('#payChips');
+  const listHost = screen.querySelector('#payList');
+
+  function makeRow(r, repaint){
+    const s = r.s;
+    const pill = payPill(s);
+    const el = document.createElement('div');
+    el.className = 'pay-row';
+    el.innerHTML = `<div class="pay-head"><div style="min-width:0;"><div class="pay-name">${esc(r.name)}</div><div class="hint">${esc(r.c.name)}${r.e.billing==='monthly'?' · mensile':' · bimestrale'}${s.due>0?' · '+s.due+(s.due===1?' mese':' mesi'):''}</div></div><span class="pill" style="${pill.style}">${pill.label}</span></div>`;
+    el.querySelector('.pay-head').onclick = () => {
+      if(state.payExpanded[r.key]) delete state.payExpanded[r.key]; else state.payExpanded[r.key] = true;
+      repaint();
+    };
+    if(state.payExpanded[r.key]) el.appendChild(buildPayDetail(r, repaint));
+    return el;
+  }
+
+  function paint(){
+    const all = [];
+    courses.forEach(([cid,c])=>{
+      if(state.payCourse && state.payCourse!==cid) return;
+      const enr = state.courseEnrollments[cid] || {};
+      const pays = state.coursePayments[cid] || {};
+      Object.entries(enr).forEach(([eid,e])=>{
+        const payMap = pays[eid] || {};
+        all.push({ key:cid+'|'+eid, cid, eid, c, e, payMap, s:courseDueSummary(c, payMap, e.billing), name:e.name||'—' });
+      });
+    });
+    const totDue = all.reduce((a,r)=>a+r.s.dueAmount, 0);
+    const totPaid = all.reduce((a,r)=>a+r.s.paidAmount, 0);
+    const peopleDue = all.filter(r=>r.s.due>0).length;
+    head.innerHTML = `<div class="card">
+      <div class="list-row"><span>Da incassare</span><span class="pill" style="${totDue>0?'color:var(--danger);border-color:var(--danger);':''}">€ ${fmtEuro(totDue)}</span></div>
+      <div class="list-row"><span>Corsisti con quote da pagare</span><span class="pill">${peopleDue} su ${all.length}</span></div>
+      <div class="list-row"><span>Già incassato</span><span class="pill">€ ${fmtEuro(totPaid)}</span></div>
+      ${loadedCount<courses.length?`<div class="hint" style="margin-top:6px;">Carico i dati… (${loadedCount}/${courses.length} corsi)</div>`:''}
+    </div>`;
+
+    const q = normTxt(state.payQuery.trim());
+    const byQuery = q ? all.filter(r=>normTxt(r.name).includes(q)) : all;
+    const nDue = byQuery.filter(r=>r.s.due>0).length;
+    const nPaid = byQuery.length - nDue;
+    chips.innerHTML = '';
+    [['due','Da pagare ('+nDue+')'],['paid','Pagati ('+nPaid+')'],['all','Tutti ('+byQuery.length+')']].forEach(([k,lab])=>{
+      const b = document.createElement('button');
+      b.className = state.payFilter===k ? 'active' : '';
+      b.textContent = lab;
+      b.onclick = () => { state.payFilter = k; state.payLimit = 30; paint(); };
+      chips.appendChild(b);
+    });
+
+    // le righe aperte restano visibili anche se, dopo una modifica, non rientrano più nel filtro
+    let rows = byQuery.filter(r => state.payFilter==='all' || (state.payFilter==='due' ? r.s.due>0 : r.s.due===0) || state.payExpanded[r.key]);
+    rows.sort((a,b)=> state.paySort==='due'
+      ? (b.s.dueAmount-a.s.dueAmount) || a.name.localeCompare(b.name,'it')
+      : a.name.localeCompare(b.name,'it') || String(a.c.name).localeCompare(String(b.c.name),'it'));
+
+    listHost.innerHTML = '';
+    if(!courses.length){ listHost.innerHTML = `<div class="hint">Nessun corso ancora creato.</div>`; return; }
+    if(!rows.length){ listHost.innerHTML = `<div class="hint">${byQuery.length?'Nessun corsista in questo elenco.':'Nessun corsista trovato.'}</div>`; return; }
+    rows.slice(0, state.payLimit).forEach(r=> listHost.appendChild(makeRow(r, paint)));
+    if(rows.length > state.payLimit){
+      const more = document.createElement('button');
+      more.className = 'btn-ghost'; more.style.cssText = 'width:100%;margin-top:10px;';
+      more.textContent = 'Mostra altri ('+(rows.length-state.payLimit)+')';
+      more.onclick = () => { state.payLimit += 30; paint(); };
+      listHost.appendChild(more);
+    }
+  }
+
+  screen.querySelector('#paySearch').oninput = (e)=>{ state.payQuery = e.target.value; state.payLimit = 30; paint(); };
+  screen.querySelector('#payCourse').onchange = (e)=>{ state.payCourse = e.target.value; state.payLimit = 30; paint(); };
+  screen.querySelector('#paySort').onchange = (e)=>{ state.paySort = e.target.value; paint(); };
+  paint();
+}
+
+/* ================= Presenze con orario limite + recuperi lezioni ================= */
+const ATTENDANCE_CUTOFF_HOUR = 13; // i corsisti possono inviare/cambiare la presenza fino alle 13:00 del giorno della lezione
+function nowDate(){ return state.debugNow ? new Date(state.debugNow) : new Date(); }
+function nextLesson(course){
+  const now = nowDate();
+  const sessions = getCourseSessions(course);
+  for(let i=0;i<15;i++){
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate()+i);
+    const key = dateKey(d);
+    if(key < course.startDate || key > course.endDate) continue;
+    const todays = sessions.filter(s=>s.weekday===d.getDay()).sort((a,b)=>a.hour-b.hour);
+    for(const s of todays){
+      const end = new Date(d.getFullYear(), d.getMonth(), d.getDate(), s.hour+1);
+      if(end > now) return { date:key, hour:s.hour, courtId:s.courtId };
+    }
+  }
+  return null;
+}
+function attendanceCutoff(date, hour){
+  const [y,m,d] = date.split('-').map(Number);
+  return new Date(y, m-1, d, Math.min(ATTENDANCE_CUTOFF_HOUR, hour), 0, 0);
+}
+
+const myAttListeners = new Set();
+function loadMyAttendance(cid, date, eid){
+  const key = cid+'|'+date+'|'+eid;
+  if(myAttListeners.has(key)) return;
+  myAttListeners.add(key);
+  onValue(ref(db, cpath('courseAttendance/'+cid+'/'+date+'/'+eid)), s=>{
+    state.myAttendance[cid+'|'+date] = s.val();
+    renderCurrent();
+  }, err=>console.error('myAttendance', err));
+}
+const recoveryListeners = new Set();
+function loadCourseRecoveries(cid){
+  if(recoveryListeners.has(cid)) return;
+  recoveryListeners.add(cid);
+  onValue(ref(db, cpath('courseRecoveries/'+cid)), s=>{
+    state.courseRecoveries[cid] = s.val()||{};
+    renderCurrent();
+  }, err=>console.error('recoveries', err));
+}
+
+/* Ore da recuperare = assenze registrate − presenze di recupero confermate dal maestro */
+function enrolleeBacklog(fromCid, eid){
+  const hist = state.courseAttendanceByCourse[fromCid] || {};
+  let absences = 0;
+  Object.values(hist).forEach(dm=>{ if(dm && dm[eid]===false) absences++; });
+  const recs = (state.courseRecoveries[fromCid] || {})[eid] || {};
+  const recovered = Object.values(recs).filter(r=>r && r.status==='present').length;
+  return { absences, recovered, owed: Math.max(0, absences-recovered) };
+}
+function lessonRecoveries(toCid, date){
+  const out = [];
+  Object.entries(state.courseRecoveries||{}).forEach(([fromCid, byEid])=>{
+    Object.entries(byEid||{}).forEach(([fromEid, recs])=>{
+      Object.entries(recs||{}).forEach(([rid, rec])=>{
+        if(rec && rec.toCid===toCid && rec.toDate===date) out.push({ fromCid, fromEid, rid, rec });
+      });
+    });
+  });
+  return out;
+}
+function lessonHoles(cid, date){
+  const c = state.courses[cid] || {};
+  const day = (state.courseAttendanceByCourse[cid] || {})[date] || {};
+  const absent = Object.values(day).filter(v=>v===false).length;
+  const free = Math.max(0, (Number(c.maxSeats)||0) - (Number(c.enrolledCount)||0));
+  const taken = lessonRecoveries(cid, date).filter(x=>x.rec.status==='proposed' || x.rec.status==='present').length;
+  return { absent, free, taken, holes: Math.max(0, absent + free - taken) };
+}
+function enrolleePhone(e){
+  if(e && e.phone) return e.phone;
+  if(e && e.uid){ const m = Object.values(state.members||{}).find(x=>x && x.uid===e.uid); if(m && m.phone) return m.phone; }
+  return '';
+}
+function recoveryCandidates(toCid, date){
+  const target = state.courses[toCid] || {};
+  const lvl = normTxt(target.livello||'').trim();
+  const already = new Set(lessonRecoveries(toCid, date).map(x=>x.fromCid+'|'+x.fromEid));
+  const out = [];
+  Object.entries(state.courses||{}).forEach(([cid2, c2])=>{
+    if(cid2===toCid) return;
+    Object.entries(state.courseEnrollments[cid2]||{}).forEach(([eid, e])=>{
+      if(already.has(cid2+'|'+eid)) return;
+      const bl = enrolleeBacklog(cid2, eid);
+      out.push({ fromCid:cid2, fromEid:eid, e, c:c2, owed:bl.owed, sameLevel: normTxt(c2.livello||'').trim()===lvl, name:e.name||'—' });
+    });
+  });
+  return out;
+}
+async function setRecovery(cd, toCid, date, status){
+  const rec = {
+    toCid, toDate:date, status,
+    name: cd.name||'',
+    phone: cd.phone!==undefined ? cd.phone : enrolleePhone(cd.e),
+    fromCourse: cd.fromCourseName || (cd.c && cd.c.name) || '',
+    level: cd.level || (cd.c && cd.c.livello) || '',
+    by: state.uid, ts: Date.now()
+  };
+  try{ await set(ref(db, cpath('courseRecoveries/'+cd.fromCid+'/'+cd.fromEid+'/'+date+'_'+toCid)), rec); }
+  catch(err){ toast('Errore: '+err.message); }
+}
+async function removeRecovery(p){
+  try{ await remove(ref(db, cpath('courseRecoveries/'+p.fromCid+'/'+p.fromEid+'/'+p.rid))); }
+  catch(err){ toast('Errore: '+err.message); }
+}
+function recoveryMessage(cd, toCourse, date, hour){
+  const dow = new Date(date+'T00:00:00').getDay();
+  const owedTxt = cd.owed>0 ? ' Hai '+cd.owed+(cd.owed===1?' ora':' ore')+' da recuperare: ti va di venire?' : ' Ti va di unirti?';
+  return 'Ciao '+cd.name+', dal '+CLUB_NAME+': nel corso "'+toCourse.name+'" (livello '+(toCourse.livello||'-')+') '+WEEKDAY_FULL[dow]+' '+fmtDateDisplay(date)+' alle '+String(hour).padStart(2,'0')+':00 si è liberato un posto.'+owedTxt+' Rispondi per confermare!';
+}
+/* Presente / Assente per una lezione (ritocca o azzera con un secondo tocco) */
+function attendanceButtons(cid, date, eid, cur){
+  const wrap = document.createElement('div');
+  wrap.className = 'pay-opts';
+  [[true,'Presente','on-paid'],[false,'Assente','on-due']].forEach(([val,lab,cls])=>{
+    const b = document.createElement('button');
+    b.className = 'small-btn' + (cur===val ? ' '+cls : '');
+    b.style.padding = '6px 10px'; b.style.fontSize = '11px';
+    b.textContent = lab;
+    b.onclick = async () => {
+      try{
+        if(cur===val) await remove(ref(db, cpath('courseAttendance/'+cid+'/'+date+'/'+eid)));
+        else await set(ref(db, cpath('courseAttendance/'+cid+'/'+date+'/'+eid)), val);
+      }catch(err){ toast('Errore: '+err.message); }
+    };
+    wrap.appendChild(b);
+  });
+  return wrap;
+}
+
+/* Pannello del maestro per una lezione: presenze, recuperi in programma, proposte a scorrimento infinito */
+function buildRecoveryPanel(cid, date, hour){
+  const course = state.courses[cid];
+  Object.keys(state.courses).forEach(id=>{ loadCourseEnrollments(id); loadCourseAttendanceAll(id); loadCourseRecoveries(id); });
+  const loaded = Object.keys(state.courses).every(id=> state.courseEnrollments[id]!==undefined && state.courseAttendanceByCourse[id]!==undefined);
+  const lessonKey = cid+'|'+date;
+  const skipped = state.recoSkipped[lessonKey] || (state.recoSkipped[lessonKey] = {});
+  const hl = lessonHoles(cid, date);
+  const dow = new Date(date+'T00:00:00').getDay();
+
+  const panel = document.createElement('div');
+  panel.className = 'reco-panel';
+  panel.innerHTML = `
+    <div class="section-title">${esc(course.name)} · ${WEEKDAY_FULL[dow]} ${fmtDateDisplay(date)} · ${String(hour).padStart(2,'0')}:00</div>
+    <div class="hint" style="margin-bottom:8px;">Posti da riempire: <b style="color:var(--chalk);">${hl.holes}</b> (assenti ${hl.absent}, posti liberi ${hl.free}, già coperti da recuperi ${hl.taken})</div>
+    <div class="section-title" style="margin-top:8px;">Presenze della lezione</div>
+    <div id="recoAtt"></div>
+    <div class="section-title" style="margin-top:14px;">Recuperi in programma</div>
+    <div id="recoPlanned"></div>
+    <div class="section-title" style="margin-top:14px;">Proposte per riempire i buchi</div>
+    <div class="hint" style="margin-bottom:6px;">Di default: corsisti di altri corsi dello stesso livello (${esc(course.livello||'-')}) con ore da recuperare, prima chi ne ha di più. Puoi cercare anche altri livelli.</div>
+    <div class="seg" id="recoLevel" style="margin-bottom:8px;"></div>
+    <div class="field"><input id="recoSearch" type="text" placeholder="Cerca un corsista di un altro corso…" autocomplete="off" value="${esc(state.recoSearch)}"></div>
+    <div class="reco-scroll" id="recoScroll"></div>`;
+
+  // presenze della lezione (il maestro può sempre segnare o cambiare)
+  const attHost = panel.querySelector('#recoAtt');
+  const enr = Object.entries(state.courseEnrollments[cid]||{});
+  const day = (state.courseAttendanceByCourse[cid]||{})[date] || {};
+  if(!enr.length) attHost.innerHTML = `<div class="hint">Nessun corsista iscritto.</div>`;
+  enr.forEach(([eid,e])=>{
+    const row = document.createElement('div'); row.className = 'list-row';
+    row.innerHTML = `<span>${esc(e.name)}</span>`;
+    row.appendChild(attendanceButtons(cid, date, eid, day[eid]));
+    attHost.appendChild(row);
+  });
+
+  // recuperi già in programma per questa lezione
+  const plannedHost = panel.querySelector('#recoPlanned');
+  const planned = lessonRecoveries(cid, date);
+  if(!planned.length) plannedHost.innerHTML = `<div class="hint">Nessun recupero ancora proposto per questa lezione.</div>`;
+  planned.forEach(p=>{
+    const r = p.rec;
+    const bl = enrolleeBacklog(p.fromCid, p.fromEid);
+    const label = r.status==='present' ? 'Presente · recuperata' : (r.status==='absent' ? 'Assente' : 'Proposto');
+    const row = document.createElement('div'); row.className = 'reco-row';
+    row.innerHTML = `<div class="pay-head" style="cursor:default;"><div style="min-width:0;"><div class="pay-name">${esc(r.name)}</div><div class="hint">${esc(r.fromCourse||'')}${r.level?' · livello '+esc(r.level):''} · ${bl.owed} ${bl.owed===1?'ora':'ore'} ancora da recuperare</div></div><span class="pill" style="${r.status==='absent'?'color:var(--danger);border-color:var(--danger);':''}">${label}</span></div>`;
+    const acts = document.createElement('div'); acts.className = 'reco-actions';
+    const cd = { fromCid:p.fromCid, fromEid:p.fromEid, name:r.name, phone:r.phone||'', fromCourseName:r.fromCourse||'', level:r.level||'' };
+    [['present','Presente'],['absent','Assente']].forEach(([st,lab])=>{
+      const b = document.createElement('button');
+      b.className = 'small-btn' + (r.status===st ? (st==='present'?' on-paid':' on-due') : '');
+      b.textContent = lab;
+      b.onclick = () => {
+        if(r.status===st) return;
+        if(st==='present' && !confirm('Confermi la presenza di '+r.name+'? Verrà recuperata in automatico 1 assenza arretrata.')) return;
+        setRecovery(cd, cid, date, st);
+      };
+      acts.appendChild(b);
+    });
+    const rm = document.createElement('button'); rm.className = 'small-btn'; rm.textContent = 'Rimuovi';
+    rm.onclick = () => removeRecovery(p);
+    acts.appendChild(rm);
+    row.appendChild(acts);
+    plannedHost.appendChild(row);
+  });
+
+  // filtro livello + ricerca
+  const seg = panel.querySelector('#recoLevel');
+  [[false,'Stesso livello ('+(course.livello||'-')+')'],[true,'Tutti i livelli']].forEach(([all,lab])=>{
+    const b = document.createElement('button'); b.textContent = lab; b.className = (!!state.recoAll===all) ? 'active' : '';
+    b.onclick = () => { state.recoAll = all; state.recoLimit = 15; state.recoScroll = 0; renderApp(); };
+    seg.appendChild(b);
+  });
+
+  const scroll = panel.querySelector('#recoScroll');
+  function computeRows(){
+    const q = normTxt(state.recoSearch.trim());
+    const all = recoveryCandidates(cid, date);
+    let rows;
+    if(q) rows = all.filter(x=>normTxt(x.name).includes(q));           // ricerca manuale: qualsiasi livello, anche senza ore da recuperare
+    else if(state.recoAll) rows = all.filter(x=>x.owed>0);
+    else rows = all.filter(x=>x.sameLevel && x.owed>0);                // default: stesso livello con ore da recuperare
+    rows.sort((a,b)=>
+      ((skipped[a.fromCid+'|'+a.fromEid]?1:0) - (skipped[b.fromCid+'|'+b.fromEid]?1:0)) ||
+      ((b.sameLevel?1:0) - (a.sameLevel?1:0)) || (b.owed - a.owed) || a.name.localeCompare(b.name,'it'));
+    return rows;
+  }
+  function makeCandRow(cd, isFirst){
+    const key = cd.fromCid+'|'+cd.fromEid;
+    const isSkipped = !!skipped[key];
+    const phone = enrolleePhone(cd.e);
+    const row = document.createElement('div');
+    row.className = 'reco-row' + (isSkipped ? ' skipped' : '');
+    row.innerHTML = `<div class="pay-head" style="cursor:default;"><div style="min-width:0;"><div class="pay-name">${esc(cd.name)}${isFirst&&!isSkipped?' <span class="pill" style="padding:2px 7px;">prossimo consigliato</span>':''}</div><div class="hint">${esc(cd.c.name)} · livello ${esc(cd.c.livello||'-')}${cd.sameLevel?'':' · <b>altro livello</b>'}${isSkipped?' · saltato':''}</div></div><span class="pill" style="${cd.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${cd.owed>0?cd.owed+(cd.owed===1?' ora':' ore')+' da recuperare':'nessuna ora da recuperare'}</span></div>`;
+    const acts = document.createElement('div'); acts.className = 'reco-actions';
+    const wa = document.createElement('button'); wa.className = 'btn-ghost'; wa.style.cssText = 'flex:1;padding:8px 10px;font-size:12px;';
+    wa.textContent = phone ? 'Invia messaggio' : 'Nessun numero';
+    wa.disabled = !phone;
+    wa.onclick = () => {
+      window.open('https://wa.me/'+normalizePhone(phone)+'?text='+encodeURIComponent(recoveryMessage(cd, course, date, hour)), '_blank');
+      setRecovery(cd, cid, date, 'proposed');
+    };
+    const pr = document.createElement('button'); pr.className = 'small-btn'; pr.textContent = 'Presente';
+    pr.onclick = () => {
+      const msg = cd.owed>0
+        ? 'Confermi la presenza di '+cd.name+'? Verrà recuperata in automatico 1 assenza arretrata.'
+        : cd.name+' non ha ore da recuperare: registrare comunque la presenza?';
+      if(confirm(msg)) setRecovery(cd, cid, date, 'present');
+    };
+    const ab = document.createElement('button'); ab.className = 'small-btn'; ab.textContent = 'Assente';
+    ab.onclick = () => setRecovery(cd, cid, date, 'absent');
+    const sk = document.createElement('button'); sk.className = 'small-btn'; sk.textContent = isSkipped ? 'Rimetti' : 'Salta';
+    sk.onclick = () => { if(skipped[key]) delete skipped[key]; else skipped[key] = true; renderApp(); };
+    [wa, pr, ab, sk].forEach(b=>acts.appendChild(b));
+    row.appendChild(acts);
+    return row;
+  }
+  let rowsAll = [], rendered = 0;
+  function sentinel(){
+    const n = rowsAll.length - rendered;
+    const s = document.createElement('div'); s.className = 'hint'; s.dataset.sentinel = '1'; s.style.cssText = 'text-align:center;padding:10px 0;';
+    s.textContent = n>0 ? 'Scorri per altre opzioni ('+n+')…' : '';
+    return s;
+  }
+  function appendMore(){
+    const old = scroll.querySelector('[data-sentinel]'); if(old) old.remove();
+    rowsAll.slice(rendered, state.recoLimit).forEach((cd, i)=> scroll.appendChild(makeCandRow(cd, rendered+i===0)));
+    rendered = Math.min(rowsAll.length, Math.max(rendered, state.recoLimit));
+    if(rendered < rowsAll.length) scroll.appendChild(sentinel());
+  }
+  if(!loaded){
+    scroll.innerHTML = `<div class="hint" style="padding:10px 0;">Carico i corsisti degli altri corsi…</div>`;
+  } else {
+    rowsAll = computeRows();
+    if(!rowsAll.length){
+      const q = state.recoSearch.trim();
+      scroll.innerHTML = `<div class="hint" style="padding:10px 0;">${q ? 'Nessun corsista trovato.' : 'Nessun corsista con ore da recuperare'+(state.recoAll?'':' in questo livello')+'. Prova "Tutti i livelli" o cerca un nome.'}</div>`;
+    } else appendMore();
+    scroll.addEventListener('scroll', ()=>{
+      state.recoScroll = scroll.scrollTop;
+      if(rendered < rowsAll.length && scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 80){
+        state.recoLimit += 15;
+        appendMore();
+      }
+    });
+  }
+  panel.querySelector('#recoSearch').oninput = (e)=>{
+    state.recoSearch = e.target.value; state.recoLimit = 15; state.recoScroll = 0;
+    if(!loaded) return;
+    scroll.innerHTML = ''; rendered = 0; rowsAll = computeRows();
+    if(!rowsAll.length) scroll.innerHTML = `<div class="hint" style="padding:10px 0;">${state.recoSearch.trim() ? 'Nessun corsista trovato.' : 'Nessun corsista con ore da recuperare.'}</div>`;
+    else appendMore();
+  };
+  panel._restore = () => { if(state.recoScroll) scroll.scrollTop = state.recoScroll; };
+  return panel;
+}
+
+function pwField(id, placeholder, autocomplete){
+  return `<div class="pw-wrap"><input id="${id}" type="password" placeholder="${placeholder||''}" autocomplete="${autocomplete||'off'}"><button type="button" class="pw-toggle" aria-label="Mostra o nascondi la password">Mostra</button></div>`;
+}
+document.addEventListener('click', (e)=>{
+  const b = e.target.closest && e.target.closest('.pw-toggle');
+  if(!b) return;
+  const inp = b.parentElement.querySelector('input');
+  if(!inp) return;
+  const show = inp.type === 'password';
+  inp.type = show ? 'text' : 'password';
+  b.textContent = show ? 'Nascondi' : 'Mostra';
+});
+function isValidPhone(p){ return ((p||'').replace(/\D/g,'')).length >= 8; }
+
 function renderAuthScreen(){
   const isRegister = (state.authStep || 'login') === 'register';
   root.innerHTML = `
@@ -636,8 +1340,8 @@ function renderAuthScreen(){
       <div class="card" style="display:flex;flex-direction:column;gap:12px;">
         <div class="field"><label>Email</label><input id="authEmail" type="email" placeholder="tuaemail@esempio.it" autocomplete="email" value="${state.authEmail||''}"></div>
         ${isRegister ? `<div class="field"><label>Nome e cognome</label><input id="authName" placeholder="Nome e cognome"></div>` : ''}
-        ${isRegister ? `<div class="field"><label>Cellulare (opzionale, per solleciti WhatsApp)</label><input id="authPhone" type="tel" placeholder="Es. 333 1234567"></div>` : ''}
-        <div class="field"><label>Password</label><input id="authPass" type="password" placeholder="${isRegister?'Almeno 6 caratteri':'••••••••'}" autocomplete="${isRegister?'new-password':'current-password'}"></div>
+        ${isRegister ? `<div class="field"><label>Cellulare (obbligatorio, per solleciti WhatsApp)</label><input id="authPhone" type="tel" placeholder="Es. 333 1234567"></div>` : ''}
+        <div class="field"><label>Password</label>${pwField('authPass', isRegister?'Almeno 6 caratteri':'••••••••', isRegister?'new-password':'current-password')}</div>
         <div id="authErr"></div>
         <button class="btn-primary" id="authSubmit">${isRegister ? 'Crea account' : 'Accedi'}</button>
         ${!isRegister ? `<button class="link" id="forgotBtn" style="align-self:center;">Password dimenticata?</button>` : ''}
@@ -663,6 +1367,7 @@ function renderAuthScreen(){
         const name = document.getElementById('authName').value.trim();
         const phone = document.getElementById('authPhone').value.trim();
         if(!name){ errBox.innerHTML = `<div class="error-box">Inserisci il tuo nome.</div>`; return; }
+        if(!isValidPhone(phone)){ errBox.innerHTML = `<div class="error-box">Il numero di cellulare è obbligatorio.</div>`; return; }
         const cred = await createUserWithEmailAndPassword(auth, email, pass);
         await set(ref(db, cpath('members/'+cred.user.uid)), { name, phone: phone||null, uid: cred.user.uid, createdAt: Date.now() });
       } else {
@@ -739,7 +1444,7 @@ function attachListeners(){
   }
   onValue(ref(db, cpath('myEnrollments/'+state.uid)), s=>{
     state.myEnrollments = s.val()||{};
-    Object.entries(state.myEnrollments).forEach(([cid,eid])=> loadCoursePayment(cid, eid));
+    Object.entries(state.myEnrollments).forEach(([cid,eid])=>{ loadCoursePayment(cid, eid); loadMyEnrollment(cid, eid); });
     renderCurrent();
   }, showFatalError);
 }
@@ -780,6 +1485,16 @@ function loadLoyaltyForMember(uid){
   }, err=>console.error('loyaltyRedemptions', err));
 }
 
+const myEnrollListeners = new Set();
+function loadMyEnrollment(cid, eid){
+  const key = cid+'|'+eid;
+  if(myEnrollListeners.has(key)) return;
+  myEnrollListeners.add(key);
+  onValue(ref(db, cpath('courseEnrollments/'+cid+'/'+eid)), s=>{
+    state.myEnrollmentData[cid] = s.val()||{};
+    renderCurrent();
+  }, err=>console.error('myEnrollment', err));
+}
 const paymentListenersLoaded = new Set();
 function loadCoursePayment(cid, eid){
   const key = cid+'|'+eid;
@@ -798,6 +1513,7 @@ function loadCoursePaymentsForCourse(cid){
   paymentListenersLoaded.add(key);
   onValue(ref(db, cpath('coursePayments/'+cid)), s=>{
     state.coursePayments[cid] = s.val()||{};
+    state.payLoaded[cid] = true;
     renderCurrent();
   }, err=>console.error('coursePayments', err));
 }
@@ -881,7 +1597,7 @@ function renderCompleteProfile(){
       <div class="hint">Non troviamo un profilo socio collegato al tuo account. Inserisci il tuo nome per completarlo.</div>
       <div class="card" style="display:flex;flex-direction:column;gap:12px;">
         <div class="field"><label>Il tuo nome</label><input id="myName" placeholder="Nome e cognome"></div>
-        <div class="field"><label>Cellulare (opzionale)</label><input id="myPhone" type="tel" placeholder="Es. 333 1234567"></div>
+        <div class="field"><label>Cellulare (obbligatorio)</label><input id="myPhone" type="tel" placeholder="Es. 333 1234567"></div>
         <button class="btn-primary" id="registerBtn">Salva</button>
       </div>
       <button class="link" id="logoutLink" style="align-self:center;">Esci</button>
@@ -890,6 +1606,7 @@ function renderCompleteProfile(){
     const name = document.getElementById('myName').value.trim();
     const phone = document.getElementById('myPhone').value.trim();
     if(!name) return toast('Inserisci il tuo nome');
+    if(!isValidPhone(phone)) return toast('Il numero di cellulare è obbligatorio');
     try{
       await set(ref(db, cpath('members/'+state.uid)), { name, phone: phone||null, uid: state.uid, createdAt: Date.now() });
     }catch(e){ toast('Errore: '+e.message); }
@@ -900,6 +1617,9 @@ function renderCompleteProfile(){
 /* ================= Shell app ================= */
 function renderApp(){
   if(!state.club) return;
+  const ae = document.activeElement;
+  const keepFocus = (ae && ae.id && ae.tagName==='INPUT' && root.contains(ae)) ? { id:ae.id, s:ae.selectionStart, e:ae.selectionEnd } : null;
+  const keepScroll = window.scrollY;
   const activeTab = state.tab;
   const meObjHeader = state.members[state.me] || {name:''};
   root.innerHTML = `
@@ -921,7 +1641,7 @@ function renderApp(){
       ${state.isAdmin ? `<button data-tab="admin" class="${activeTab==='admin'?'active':''}">Admin</button>` : ''}
       ${state.isSuperAdmin ? `<button data-tab="registro" class="${activeTab==='registro'?'active':''}">Registro</button>` : ''}
     </div>`;
-  root.querySelectorAll('.tabbar button').forEach(b=>{ b.onclick = () => { state.tab = b.dataset.tab; renderApp(); }; });
+  root.querySelectorAll('.tabbar button').forEach(b=>{ b.onclick = () => { state.tab = b.dataset.tab; state.openCourseId = null; state.attendanceCourseId = null; state.absencesCourseId = null; renderApp(); }; });
   root.querySelector('#headerProfile').querySelector('.avatar,.avatar-initials').style.cursor = 'pointer';
   root.querySelector('#headerProfile').querySelector('.avatar,.avatar-initials').onclick = () => renderProfileModal();
   root.querySelector('#headerEsci').onclick = doLogout;
@@ -933,6 +1653,13 @@ function renderApp(){
   else if(activeTab==='registro' && state.isSuperAdmin) renderSuperAdminScreen(host);
   else if(activeTab==='soci') renderMembersScreen(host);
   else renderAdminScreen(host);
+  if(keepFocus){
+    const el = document.getElementById(keepFocus.id);
+    if(el && el !== document.activeElement){
+      try{ el.focus({preventScroll:true}); if(keepFocus.s!=null) el.setSelectionRange(keepFocus.s, keepFocus.e); }catch(_){}
+    }
+  }
+  if(window.scrollY !== keepScroll) window.scrollTo(0, keepScroll);
 }
 
 /* ================= Prenotazioni (senza rivelare l'identità) ================= */
@@ -1383,6 +2110,7 @@ function countRecurringOccurrences(r, periodStartDate, periodEndDate){
 
 /* ================= Vista Corsi ================= */
 function renderCorsiScreen(host){
+  if(state.isAdmin && state.corsiView==='pagamenti'){ renderPaymentsScreen(host); return; }
   const canSeeAllCourses = state.isAdmin || state.isTeacher;
   const courseList = Object.entries(state.courses||{})
     .filter(([cid])=> canSeeAllCourses || state.myEnrollments[cid])
@@ -1393,43 +2121,65 @@ function renderCorsiScreen(host){
   const allLinkedMembers = Object.entries(state.members||{}).filter(([_,m])=>m.uid);
   if(!state.draftSessions[0].courtId && state.club.courts && state.club.courts[0]) state.draftSessions[0].courtId = state.club.courts[0].id;
 
+  if(state.selectedCourseId && !courseList.some(([cid])=>cid===state.selectedCourseId)) state.selectedCourseId = null;
+  if(!state.selectedCourseId && courseList.length===1) state.selectedCourseId = courseList[0][0];
+  const edCourse = state.editCourseId ? state.courses[state.editCourseId] : null;
+  if(state.editCourseId && !edCourse){ state.editCourseId = null; state.courseForm = null; }
+  const formOpen = state.isAdmin && (state.showCourseForm || !!state.editCourseId);
+  const q = v => String(v==null?'':v).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+  const f = state.courseForm || (edCourse
+    ? { name:edCourse.name||'', livello:edCourse.livello||'Principianti', teacherUid:edCourse.teacherUid||'', startDate:edCourse.startDate||todayKey(), endDate:edCourse.endDate||'', maxSeats:edCourse.maxSeats||8, monthlyFee:edCourse.monthlyFee||0 }
+    : { name:'', livello:'Principianti', teacherUid:'', startDate:todayKey(), endDate:'', maxSeats:8, monthlyFee:40 });
+  const LEVELS = ['Principianti','Base','Intermedio','Avanzato','Agonisti'];
+
   const screen = document.createElement('div');
   screen.className = 'screen';
   screen.innerHTML = `
-    <div id="myAccountHost"></div>
+    ${state.isAdmin ? corsiSwitchHtml() : ''}
+    ${courseList.length ? `<div class="card"><div class="field"><label>Scegli il corso</label>
+      <select id="courseSelect"><option value="">— seleziona un corso —</option>${courseList.map(([cid,c])=>`<option value="${cid}" ${cid===state.selectedCourseId?'selected':''}>${q(c.name)}</option>`).join('')}</select></div></div>` : ''}
     <div id="courseCards"></div>
-    ${state.isAdmin ? `
-    <div class="card">
-      <div class="section-title">Nuovo corso</div>
-      <div class="field"><label>Nome corso</label><input id="cName" placeholder="Es. Corso principianti"></div>
+    <div id="myAccountHost"></div>
+    ${state.isAdmin ? (formOpen ? `
+    <div class="card" id="courseFormCard">
+      <div class="section-title">${edCourse ? 'Modifica corso' : 'Nuovo corso'}</div>
+      <div class="field"><label>Nome corso</label><input id="cName" value="${q(f.name)}" placeholder="Es. Corso principianti"></div>
       <div class="field"><label>Livello</label>
-        <select id="cLevel">
-          <option value="Principianti">Principianti</option>
-          <option value="Base">Base</option>
-          <option value="Intermedio">Intermedio</option>
-          <option value="Avanzato">Avanzato</option>
-          <option value="Agonisti">Agonisti</option>
-        </select>
+        <select id="cLevel">${LEVELS.map(l=>`<option value="${l}" ${l===f.livello?'selected':''}>${l}</option>`).join('')}</select>
       </div>
-      <div class="field"><label>Maestro</label>
-        <select id="cTeacher">
-          <option value="">— nessuno assegnato —</option>
-          ${allLinkedMembers.map(([id,m])=>`<option value="${m.uid}">${m.name}${state.teachers[m.uid]?' (maestro)':''}</option>`).join('')}
-        </select>
-      </div>
+      <div class="field"><label>Maestro</label><div id="teacherPickerHost"></div></div>
       <div class="section-title" style="margin-top:6px;">Giorni della settimana</div>
       <div id="sessionRows"></div>
       <button class="btn-ghost" id="addSessionBtn" style="width:100%;margin-top:4px;">+ Aggiungi un altro giorno</button>
-      <div class="field" style="margin-top:10px;"><label>Data inizio</label><input id="cStart" type="date" value="${todayKey()}"></div>
-      <div class="field"><label>Data fine</label><input id="cEnd" type="date"></div>
-      <div class="field"><label>Posti massimi</label><input id="cMax" type="number" min="1" value="8"></div>
-      <div class="field"><label>Quota mensile (€)</label><input id="cFee" type="number" min="0" step="1" value="40"></div>
-      <button class="btn-primary" id="createCourseBtn" style="width:100%;margin-top:8px;">Crea corso</button>
-    </div>` : ''}
+      <div class="field" style="margin-top:10px;"><label>Data inizio</label><input id="cStart" type="date" value="${q(f.startDate)}"></div>
+      <div class="field"><label>Data fine</label><input id="cEnd" type="date" value="${q(f.endDate)}"></div>
+      <div class="field"><label>Posti massimi</label><input id="cMax" type="number" min="1" value="${q(f.maxSeats)}"></div>
+      <div class="field"><label>Quota mensile (€)</label><input id="cFee" type="number" min="0" step="1" value="${q(f.monthlyFee)}"></div>
+      <div class="btn-row" style="margin-top:8px;">
+        <button class="btn-ghost" id="cancelCourseBtn">Annulla</button>
+        <button class="btn-primary" id="createCourseBtn">${edCourse ? 'Salva modifiche' : 'Crea corso'}</button>
+      </div>
+    </div>` : `<button class="btn-ghost" id="newCourseBtn" style="width:100%;">+ Nuovo corso</button>`) : ''}
   `;
   host.replaceChildren(screen);
+  bindCorsiSwitch(screen);
 
-  if(state.isAdmin){
+  function captureCourseForm(){
+    if(!screen.querySelector('#cName')) return;
+    const g = id => screen.querySelector(id).value;
+    state.courseForm = { name:g('#cName'), livello:g('#cLevel'), teacherUid:(state.pickers.teacher||{}).value||'', startDate:g('#cStart'), endDate:g('#cEnd'), maxSeats:g('#cMax'), monthlyFee:g('#cFee') };
+  }
+  const formCard = screen.querySelector('#courseFormCard');
+  if(formCard){ formCard.addEventListener('input', captureCourseForm); formCard.addEventListener('change', captureCourseForm); }
+
+  if(state.isAdmin && formOpen){
+    const tHost = screen.querySelector('#teacherPickerHost');
+    if(tHost){
+      const tItems = allLinkedMembers
+        .map(([_,m])=>({ value:m.uid, label:m.name+(state.teachers[m.uid]?' (maestro)':'') }))
+        .sort((a,b)=>a.label.localeCompare(b.label,'it'));
+      tHost.appendChild(makePicker('teacher', tItems, { initial:f.teacherUid, placeholder:'Cerca socio per nome…', noneLabel:'— nessuno assegnato —', onChange:()=>captureCourseForm() }));
+    }
     const rowsHost = screen.querySelector('#sessionRows');
     state.draftSessions.forEach((s,i)=>{
       const row = document.createElement('div');
@@ -1451,9 +2201,10 @@ function renderCorsiScreen(host){
       row.querySelector('.dsWeekday').onchange = (e)=>{ state.draftSessions[i].weekday = parseInt(e.target.value,10); };
       row.querySelector('.dsHour').onchange = (e)=>{ state.draftSessions[i].hour = parseInt(e.target.value,10); };
       const rmBtn = row.querySelector('[data-act="removeSession"]');
-      if(rmBtn) rmBtn.onclick = () => { state.draftSessions.splice(i,1); renderApp(); };
+      if(rmBtn) rmBtn.onclick = () => { captureCourseForm(); state.draftSessions.splice(i,1); renderApp(); };
     });
     screen.querySelector('#addSessionBtn').onclick = () => {
+      captureCourseForm();
       state.draftSessions.push({ weekday: 1, hour: OPEN_HOUR, courtId: state.club.courts[0].id });
       renderApp();
     };
@@ -1466,14 +2217,19 @@ function renderCorsiScreen(host){
     const b = state.bookingsPublic[bid]; return b && slotDateTime(b.date,b.hour) >= new Date();
   }).length;
   let totalDue = 0;
+  const acctRow = (label, st) => `<div class="list-row"><span>${label}</span><span class="pill" style="${st==='due'?'color:var(--danger);border-color:var(--danger);':''}">${st==='paid'?'Pagato':(st==='exempt'?'Esente':'Da pagare')}</span></div>`;
   const courseRows = myEnrolledCourseIds.map(cid=>{
     const c = state.courses[cid]; if(!c) return null;
     const eid = state.myEnrollments[cid];
     const payMap = (state.coursePayments[cid]||{})[eid] || {};
-    const months = monthsBetween(c.startDate, c.endDate);
-    const unpaidMonths = months.filter(m => payMap[m] !== true);
-    totalDue += unpaidMonths.length * c.monthlyFee;
-    return { name:c.name, monthlyFee:c.monthlyFee, months, payMap };
+    const billing = (state.myEnrollmentData[cid]||{}).billing;
+    const sum = courseDueSummary(c, payMap, billing);
+    totalDue += sum.dueAmount;
+    const rowsHtml = sum.blocks.length ? sum.blocks.map(blk=>{
+      const st = blockStatus(payMap, blk);
+      return st==='mixed' ? blk.map(m=>acctRow(fmtMonth(m), payStatus(payMap,m))).join('') : acctRow(fmtBlock(blk), st);
+    }).join('') : '<div class="hint">Nessun pagamento ancora dovuto.</div>';
+    return { name:c.name, fee:c.monthlyFee, billing, rowsHtml };
   }).filter(Boolean);
 
   const acctCard = document.createElement('div');
@@ -1483,8 +2239,8 @@ function renderCorsiScreen(host){
     <div class="list-row"><span>Ore prenotate (da oggi in poi)</span><span class="pill">${upcomingHours}h</span></div>
     ${courseRows.map(cr=>`
       <div style="margin-top:10px;">
-        <div class="hint" style="margin-bottom:4px;"><b style="color:var(--chalk);">${cr.name}</b> · € ${cr.monthlyFee}/mese</div>
-        ${cr.months.map(m=>`<div class="list-row"><span>${fmtMonth(m)}</span><span class="pill" style="${cr.payMap[m]===true?'':'color:var(--danger);border-color:var(--danger);'}">${cr.payMap[m]===true?'Pagato':'Da pagare'}</span></div>`).join('')}
+        <div class="hint" style="margin-bottom:4px;"><b style="color:var(--chalk);">${esc(cr.name)}</b> · € ${cr.fee}/mese · ${cr.billing==='monthly'?'pagamento mensile':'pagamento bimestrale (€ '+fmtEuro((Number(cr.fee)||0)*2)+' ogni 2 mesi)'}</div>
+        ${cr.rowsHtml}
       </div>
     `).join('')}
     <div class="totale-box"><span class="l">Totale da saldare</span><span class="v" style="${totalDue>0?'color:var(--danger);':''}">€ ${totalDue.toFixed(2)}</span></div>
@@ -1492,33 +2248,48 @@ function renderCorsiScreen(host){
   acctHost.appendChild(acctCard);
 
   const cardsHost = screen.querySelector('#courseCards');
+  const courseSelect = screen.querySelector('#courseSelect');
+  if(courseSelect) courseSelect.onchange = (e)=>{
+    state.selectedCourseId = e.target.value || null;
+    state.openCourseId = null; state.attendanceCourseId = null; state.absencesCourseId = null;
+    renderApp();
+  };
   if(!courseList.length){
     cardsHost.innerHTML = `<div class="card"><div class="hint">Nessun corso ancora creato.</div></div>`;
+  } else if(!state.selectedCourseId){
+    cardsHost.innerHTML = `<div class="card"><div class="hint">Scegli un corso dal menu per vederne i dettagli.</div></div>`;
   }
-  courseList.forEach(([cid,c])=>{
+  courseList.filter(([cid])=>cid===state.selectedCourseId).forEach(([cid,c])=>{
     const card = document.createElement('div');
     card.className = 'card';
     const isMyCourse = isTeacherOfCourse(cid);
     const myEid = state.myEnrollments ? state.myEnrollments[cid] : null;
-    const isEnrolledToday = myEid && isSessionOnDate(c, todayKey());
-    if(isEnrolledToday) loadCourseAttendance(cid, todayKey());
-    const myTodayStatus = isEnrolledToday ? ((state.courseAttendance[cid+'|'+todayKey()]||{})[myEid]) : undefined;
+    const nl = myEid ? nextLesson(c) : null;
+    if(nl) loadMyAttendance(cid, nl.date, myEid);
+    const myStatus = nl ? state.myAttendance[cid+'|'+nl.date] : undefined;
+    const canDeclare = !!nl && nowDate() < attendanceCutoff(nl.date, nl.hour);
 
     card.innerHTML = `
       <div class="section-title">${c.name} ${(c.livello && (state.isAdmin||isMyCourse))?`<span class="pill" style="padding:2px 8px;">${c.livello}</span>`:''}</div>
       <div class="hint">${getCourseSessions(c).map(s=>`${WEEKDAY_FULL[s.weekday]} · ${String(s.hour).padStart(2,'0')}:00 · ${(state.club.courts.find(x=>x.id===s.courtId)||{}).name||''}`).join('<br>')}<br>
       ${fmtDateDisplay(c.startDate)} → ${fmtDateDisplay(c.endDate)} · Maestro: ${c.teacherName||'—'}<br>
       Posti: ${c.enrolledCount||0}/${c.maxSeats} · Quota: € ${c.monthlyFee}/mese</div>
-      ${isEnrolledToday ? `
+      ${nl ? `
       <div style="margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:8px;">
-        ${myTodayStatus===true
-          ? `<div class="hint" style="color:var(--ball);">✓ Presenza di oggi confermata</div>`
-          : `<button class="btn-primary" data-act="selfcheckin" data-cid="${cid}" style="width:100%;">Conferma la tua presenza di oggi</button>`}
+        <div class="hint" style="margin-bottom:8px;">Prossima lezione: <b style="color:var(--chalk);">${WEEKDAY_FULL[new Date(nl.date+'T00:00:00').getDay()]} ${fmtDateDisplay(nl.date)} · ${String(nl.hour).padStart(2,'0')}:00</b></div>
+        ${canDeclare ? `
+          <div class="btn-row">
+            <button class="${myStatus===true?'btn-primary':'btn-ghost'}" data-act="myatt" data-v="1" data-cid="${cid}">Ci sarò</button>
+            <button class="${myStatus===false?'btn-clay':'btn-ghost'}" data-act="myatt" data-v="0" data-cid="${cid}">Non ci sarò</button>
+          </div>
+          <div class="hint" style="margin-top:6px;">Puoi inviare o cambiare la risposta fino alle ${ATTENDANCE_CUTOFF_HOUR}:00 del giorno della lezione.</div>`
+        : `<div class="hint">${myStatus===true?'✓ Hai confermato la presenza.':(myStatus===false?'Hai segnalato che non ci sarai.':'Non hai inviato la presenza.')} Le risposte sono chiuse: per cambiare rivolgiti al maestro.</div>`}
       </div>` : ''}
       <div class="btn-row" style="margin-top:10px;">
         ${(state.isAdmin) ? `<button class="btn-ghost" data-act="enroll" data-cid="${cid}">Iscritti</button>` : ''}
         ${(state.isAdmin || isMyCourse) ? `<button class="btn-clay" data-act="attendance" data-cid="${cid}">Presenze</button>` : ''}
         ${(state.isAdmin || isMyCourse) ? `<button class="btn-ghost" data-act="absences" data-cid="${cid}">Assenze</button>` : ''}
+        ${state.isAdmin ? `<button class="btn-ghost" data-act="editcourse" data-cid="${cid}">Modifica</button>` : ''}
         ${state.isAdmin ? `<button class="small-btn" data-act="delcourse" data-cid="${cid}">Elimina</button>` : ''}
       </div>
       <div class="course-detail" id="detail-${cid}"></div>
@@ -1526,41 +2297,63 @@ function renderCorsiScreen(host){
     cardsHost.appendChild(card);
   });
 
-  cardsHost.querySelectorAll('[data-act="selfcheckin"]').forEach(btn=>{
+  cardsHost.querySelectorAll('[data-act="myatt"]').forEach(btn=>{
     btn.onclick = async () => {
       const cid = btn.dataset.cid;
       const eid = state.myEnrollments[cid];
+      const c = state.courses[cid];
+      const nl = c ? nextLesson(c) : null;
+      if(!eid || !nl) return;
+      if(nowDate() >= attendanceCutoff(nl.date, nl.hour)){ toast('Tempo scaduto: rivolgiti al maestro'); renderApp(); return; }
+      const v = btn.dataset.v === '1';
       try{
-        await set(ref(db, cpath('courseAttendance/'+cid+'/'+todayKey()+'/'+eid)), true);
-        toast('Presenza confermata, grazie!');
+        await set(ref(db, cpath('courseAttendance/'+cid+'/'+nl.date+'/'+eid)), v);
+        toast(v ? 'Presenza confermata, grazie!' : 'Assenza segnalata');
       }catch(e){ toast('Errore: '+e.message); }
     };
   });
   cardsHost.querySelectorAll('[data-act="absences"]').forEach(btn=>{
     btn.onclick = () => {
       const cid = btn.dataset.cid;
-      state.absencesCourseId = (state.absencesCourseId===cid) ? null : cid;
-      if(state.absencesCourseId){ loadCourseEnrollments(cid); loadCourseAttendanceAll(cid); }
+      const willOpen = state.absencesCourseId !== cid;
+      state.openCourseId = null; state.attendanceCourseId = null;
+      state.absencesCourseId = willOpen ? cid : null;
+      if(willOpen){ loadCourseEnrollments(cid); loadCourseAttendanceAll(cid); }
       renderApp();
     };
   });
   cardsHost.querySelectorAll('[data-act="enroll"]').forEach(btn=>{
     btn.onclick = () => {
       const cid = btn.dataset.cid;
-      state.openCourseId = (state.openCourseId===cid) ? null : cid;
-      if(state.openCourseId){ loadCourseEnrollments(cid); loadCoursePaymentsForCourse(cid); }
+      const willOpen = state.openCourseId !== cid;
+      state.attendanceCourseId = null; state.absencesCourseId = null;
+      state.openCourseId = willOpen ? cid : null;
+      if(willOpen){ loadCourseEnrollments(cid); loadCoursePaymentsForCourse(cid); }
       renderApp();
     };
   });
   cardsHost.querySelectorAll('[data-act="attendance"]').forEach(btn=>{
     btn.onclick = () => {
       const cid = btn.dataset.cid;
-      const c = state.courses[cid];
-      state.attendanceCourseId = cid;
-      state.attendanceDate = state.attendanceDate && state.attendanceCourseId===cid ? state.attendanceDate : nextSessionDate(c);
-      loadCourseEnrollments(cid);
-      loadCourseAttendance(cid, state.attendanceDate);
+      const willOpen = state.attendanceCourseId !== cid;
+      state.openCourseId = null; state.absencesCourseId = null;
+      state.attendanceCourseId = willOpen ? cid : null;
+      if(willOpen){
+        state.attendanceDate = nextSessionDate(state.courses[cid]);
+        loadCourseEnrollments(cid);
+        loadCourseAttendance(cid, state.attendanceDate);
+      }
       renderApp();
+    };
+  });
+  cardsHost.querySelectorAll('[data-act="editcourse"]').forEach(btn=>{
+    btn.onclick = () => {
+      const cid = btn.dataset.cid;
+      state.editCourseId = cid; state.showCourseForm = true; state.courseForm = null; delete state.pickers.teacher;
+      state.draftSessions = getCourseSessions(state.courses[cid]).map(x=>({ weekday:x.weekday, hour:x.hour, courtId:x.courtId }));
+      if(!state.draftSessions.length) state.draftSessions = [{ weekday: 1, hour: OPEN_HOUR, courtId: state.club.courts[0].id }];
+      renderApp();
+      setTimeout(()=>{ const el = document.getElementById('courseFormCard'); if(el) el.scrollIntoView({behavior:'smooth', block:'start'}); }, 60);
     };
   });
   cardsHost.querySelectorAll('[data-act="delcourse"]').forEach(btn=>{
@@ -1573,110 +2366,116 @@ function renderCorsiScreen(host){
   });
 
   // Pannello iscritti + pagamenti (solo admin)
-  if(state.openCourseId && state.courses[state.openCourseId]){
+  if(state.openCourseId && state.courses[state.openCourseId] && state.openCourseId===state.selectedCourseId){
     const cid = state.openCourseId;
     const course = state.courses[cid];
     const detailHost = screen.querySelector('#detail-'+cid);
     const enrollments = Object.entries(state.courseEnrollments[cid]||{});
     const paymentsForCourse = state.coursePayments[cid] || {};
-    const months = monthsBetween(course.startDate, course.endDate);
-    if(!months.includes(state.paymentMonth)) state.paymentMonth = months[months.length-1] || currentYearMonth();
+    const draft = state.enrollDraft[cid] || (state.enrollDraft[cid] = { name:'', phone:'', billing:'bimonthly' });
+    const enrolledUids = new Set(enrollments.map(([_,e])=>e.uid).filter(Boolean));
+    const memberItems = allLinkedMembers
+      .filter(([_,m])=>!enrolledUids.has(m.uid))
+      .map(([_,m])=>({ value:m.uid, label:m.name }))
+      .sort((a,b)=>a.label.localeCompare(b.label,'it'));
 
     const box = document.createElement('div');
     box.style.marginTop = '12px'; box.style.borderTop='1px solid var(--line)'; box.style.paddingTop='12px';
     box.innerHTML = `
       <div class="section-title">Iscritti (${enrollments.length})</div>
-      <div class="field"><label>Mese pagamento</label>
-        <select id="payMonth-${cid}">${months.map(m=>`<option value="${m}" ${m===state.paymentMonth?'selected':''}>${fmtMonth(m)}</option>`).join('')}</select>
-      </div>
-      <div class="field"><input id="enrollSearch-${cid}" placeholder="Cerca corsista…"></div>
+      <div class="field"><input id="enrollSearch-${cid}" placeholder="Cerca corsista…" autocomplete="off" value="${esc(state.enrollSearchText[cid]||'')}"></div>
       <div id="enrollList-${cid}"></div>
-      <div class="field" style="margin-top:8px;"><label>Collega a un socio esistente (opzionale)</label>
-        <select id="newEnrollMember-${cid}">
-          <option value="">— nessuno / non ha un account —</option>
-          ${allLinkedMembers.map(([id,m])=>`<option value="${m.uid}|${m.name}">${m.name}</option>`).join('')}
+      <div class="section-title" style="margin-top:14px;">Aggiungi corsista</div>
+      <div class="field"><label>Collega a un socio esistente (opzionale)</label><div id="enrollPickerHost-${cid}"></div></div>
+      <div class="field"><label>Nome corsista (se non collegato)</label><input id="newEnrollName-${cid}" placeholder="Nome e cognome" value="${esc(draft.name)}"></div>
+      <div class="field"><label>Telefono (opzionale)</label><input id="newEnrollPhone-${cid}" placeholder="Es. 333 1234567" value="${esc(draft.phone)}"></div>
+      <div class="field"><label>Pagamento</label>
+        <select id="newEnrollBilling-${cid}">
+          <option value="bimonthly" ${draft.billing!=='monthly'?'selected':''}>Bimestrale (2 × quota mensile)</option>
+          <option value="monthly" ${draft.billing==='monthly'?'selected':''}>Mensile</option>
         </select>
       </div>
-      <div class="field"><label>Nome corsista (se non collegato)</label><input id="newEnrollName-${cid}" placeholder="Nome e cognome"></div>
-      <div class="field"><label>Telefono (opzionale)</label><input id="newEnrollPhone-${cid}" placeholder="Es. 333 1234567"></div>
       <button class="btn-ghost" id="addEnrollBtn-${cid}" style="width:100%;margin-top:6px;">Aggiungi corsista</button>
     `;
     detailHost.appendChild(box);
 
-    box.querySelector('#payMonth-'+cid).onchange = (e)=>{ state.paymentMonth = e.target.value; renderApp(); };
-    box.querySelector('#newEnrollMember-'+cid).onchange = (e)=>{
-      const uidPart = e.target.value.split('|')[0];
-      const linkedMember = uidPart ? Object.values(state.members||{}).find(m=>m.uid===uidPart) : null;
-      box.querySelector('#newEnrollPhone-'+cid).value = (linkedMember && linkedMember.phone) || '';
-    };
+    box.querySelector('#enrollPickerHost-'+cid).appendChild(makePicker('enroll-'+cid, memberItems, {
+      placeholder: 'Cerca socio per nome…',
+      noneLabel: '— nessuno / non ha un account —',
+      onChange: (uid)=>{
+        const mm = uid ? allLinkedMembers.find(([_,m])=>m.uid===uid) : null;
+        draft.phone = (mm && mm[1].phone) || '';
+        box.querySelector('#newEnrollPhone-'+cid).value = draft.phone;
+      }
+    }));
+    box.querySelector('#newEnrollName-'+cid).oninput = (e)=>{ draft.name = e.target.value; };
+    box.querySelector('#newEnrollPhone-'+cid).oninput = (e)=>{ draft.phone = e.target.value; };
+    box.querySelector('#newEnrollBilling-'+cid).onchange = (e)=>{ draft.billing = e.target.value; };
 
     const enrollListHost = box.querySelector('#enrollList-'+cid);
     function paintEnrollList(filterText){
-      const f = filterText.trim().toLowerCase();
-      const filtered = f ? enrollments.filter(([_,e])=>e.name.toLowerCase().includes(f)) : enrollments;
+      const f = normTxt(filterText.trim());
+      const filtered = f ? enrollments.filter(([_,e])=>normTxt(e.name).includes(f)) : enrollments;
       enrollListHost.innerHTML = '';
       if(!filtered.length){ enrollListHost.innerHTML = `<div class="hint">Nessun corsista trovato.</div>`; return; }
       filtered.forEach(([eid,e])=>{
-        const row = document.createElement('div'); row.className='list-row';
-        row.innerHTML = `<span>${e.name}${e.phone?' · '+e.phone:''}${e.uid?' <span class="pill" style="padding:2px 7px;">collegato</span>':''}</span>`;
-        const paid = ((paymentsForCourse[eid]||{})[state.paymentMonth]) === true;
-        const payBtn = document.createElement('button');
-        payBtn.className = paid ? 'btn-primary' : 'small-btn';
-        payBtn.style.padding='6px 10px'; payBtn.style.fontSize='11px';
-        payBtn.textContent = paid ? 'Pagato' : 'Da pagare';
-        payBtn.onclick = async () => {
-          try{ await set(ref(db, cpath('coursePayments/'+cid+'/'+eid+'/'+state.paymentMonth)), !paid); }
-          catch(err){ toast('Errore: '+err.message); }
+        const payMap = paymentsForCourse[eid] || {};
+        const r = { key:cid+'|'+eid, cid, eid, c:course, e, payMap, s:courseDueSummary(course, payMap, e.billing), name:e.name||'—' };
+        const pill = payPill(r.s);
+        const row = document.createElement('div'); row.className = 'pay-row';
+        row.innerHTML = `<div class="pay-head"><div style="min-width:0;"><div class="pay-name">${esc(e.name)}${e.uid?' <span class="pill" style="padding:2px 7px;">collegato</span>':''}</div><div class="hint">${e.phone?esc(e.phone)+' · ':''}${e.billing==='monthly'?'pagamento mensile':'pagamento bimestrale'}</div></div><span class="pill" style="${pill.style}">${pill.label}</span></div>`;
+        row.querySelector('.pay-head').onclick = () => {
+          if(state.payExpanded[r.key]) delete state.payExpanded[r.key]; else state.payExpanded[r.key] = true;
+          paintEnrollList(state.enrollSearchText[cid]||'');
         };
-        const del = document.createElement('button'); del.className='small-btn'; del.textContent='Rimuovi';
-        del.onclick = async () => {
-          try{
-            await remove(ref(db, cpath('courseEnrollments/'+cid+'/'+eid)));
-            if(e.uid) await remove(ref(db, cpath('myEnrollments/'+e.uid+'/'+cid)));
-            const newCount = Math.max(0,(state.courses[cid].enrolledCount||1)-1);
-            await update(ref(db, cpath('courses/'+cid)), { enrolledCount: newCount });
-          }catch(err){ toast('Errore: '+err.message); }
-        };
-        row.appendChild(payBtn);
-        if(!paid && e.phone){
-          const waBtn = document.createElement('button');
-          waBtn.className = 'small-btn'; waBtn.style.padding='6px 10px'; waBtn.style.fontSize='11px';
-          waBtn.textContent = 'Sollecita';
-          waBtn.onclick = () => {
-            const url = buildWhatsAppReminderUrl(e.phone, e.name, course.name, fmtMonth(state.paymentMonth), course.monthlyFee);
-            window.open(url, '_blank');
+        if(state.payExpanded[r.key]){
+          const det = buildPayDetail(r, ()=>paintEnrollList(state.enrollSearchText[cid]||''));
+          const del = document.createElement('button');
+          del.className = 'small-btn'; del.style.marginTop = '10px'; del.textContent = 'Rimuovi corsista';
+          del.onclick = async () => {
+            if(!confirm('Rimuovere '+(e.name||'il corsista')+' dal corso?')) return;
+            try{
+              await remove(ref(db, cpath('courseEnrollments/'+cid+'/'+eid)));
+              if(e.uid) await remove(ref(db, cpath('myEnrollments/'+e.uid+'/'+cid)));
+              const newCount = Math.max(0,(state.courses[cid].enrolledCount||1)-1);
+              await update(ref(db, cpath('courses/'+cid)), { enrolledCount: newCount });
+            }catch(err){ toast('Errore: '+err.message); }
           };
-          row.appendChild(waBtn);
+          det.appendChild(del);
+          row.appendChild(det);
         }
-        row.appendChild(del);
         enrollListHost.appendChild(row);
       });
     }
-    paintEnrollList('');
-    box.querySelector('#enrollSearch-'+cid).oninput = (e)=> paintEnrollList(e.target.value);
+    paintEnrollList(state.enrollSearchText[cid]||'');
+    box.querySelector('#enrollSearch-'+cid).oninput = (e)=>{ state.enrollSearchText[cid] = e.target.value; paintEnrollList(e.target.value); };
 
     box.querySelector('#addEnrollBtn-'+cid).onclick = async () => {
-      const memberSel = box.querySelector('#newEnrollMember-'+cid).value;
-      const manualName = box.querySelector('#newEnrollName-'+cid).value.trim();
-      const phone = box.querySelector('#newEnrollPhone-'+cid).value.trim();
-      let name = manualName, linkedUid = null;
-      if(memberSel){ const [uidPart, namePart] = memberSel.split('|'); linkedUid = uidPart; name = namePart; }
+      const pk = state.pickers['enroll-'+cid] || {};
+      const linked = pk.value ? allLinkedMembers.find(([_,m])=>m.uid===pk.value) : null;
+      const linkedUid = linked ? linked[1].uid : null;
+      const name = linked ? linked[1].name : (draft.name||'').trim();
+      const phone = (draft.phone||'').trim();
       if(!name) return toast('Inserisci il nome o collega un socio');
       const courseNow = state.courses[cid];
       if((courseNow.enrolledCount||0) >= courseNow.maxSeats){ toast('Corso al completo'); return; }
       try{
         const newRef = push(ref(db, cpath('courseEnrollments/'+cid)));
         const eid = newRef.key;
-        await set(newRef, { name, phone, uid: linkedUid, createdAt: Date.now() });
+        const payload = { name, phone, uid: linkedUid, createdAt: Date.now() };
+        if(draft.billing==='monthly') payload.billing = 'monthly';
+        await set(newRef, payload);
         if(linkedUid) await set(ref(db, cpath('myEnrollments/'+linkedUid+'/'+cid)), eid);
         await update(ref(db, cpath('courses/'+cid)), { enrolledCount: (courseNow.enrolledCount||0)+1 });
+        delete state.enrollDraft[cid]; delete state.pickers['enroll-'+cid];
         toast('Corsista aggiunto');
+        renderApp();
       }catch(err){ toast('Errore: '+err.message); }
     };
   }
 
   // Pannello presenze (admin o maestro del corso)
-  if(state.attendanceCourseId && state.courses[state.attendanceCourseId]){
+  if(state.attendanceCourseId && state.courses[state.attendanceCourseId] && state.attendanceCourseId===state.selectedCourseId){
     const cid = state.attendanceCourseId;
     const c = state.courses[cid];
     if(state.isAdmin || isTeacherOfCourse(cid)){
@@ -1701,26 +2500,29 @@ function renderCorsiScreen(host){
         const attListHost = box.querySelector('#attList-'+cid);
         if(!enrollments.length){ attListHost.innerHTML = `<div class="hint">Nessun corsista iscritto.</div>`; }
         enrollments.forEach(([eid,e])=>{
-          const present = att[eid] === true;
           const row = document.createElement('div'); row.className='list-row';
-          row.innerHTML = `<span>${e.name}</span>`;
-          const btn = document.createElement('button');
-          btn.className = present ? 'btn-primary' : 'small-btn';
-          btn.style.padding = '6px 12px'; btn.style.fontSize='11px';
-          btn.textContent = present ? 'Presente' : 'Assente';
-          btn.onclick = async () => {
-            try{ await set(ref(db, cpath('courseAttendance/'+cid+'/'+state.attendanceDate+'/'+eid)), !present); }
-            catch(err){ toast('Errore: '+err.message); }
-          };
-          row.appendChild(btn);
+          row.innerHTML = `<span>${esc(e.name)}</span>`;
+          row.appendChild(attendanceButtons(cid, state.attendanceDate, eid, att[eid]));
           attListHost.appendChild(row);
         });
+        Object.keys(state.courses).forEach(id=>loadCourseRecoveries(id));
+        const guests = lessonRecoveries(cid, state.attendanceDate);
+        if(guests.length){
+          const gh = document.createElement('div'); gh.className='section-title'; gh.style.marginTop='12px';
+          gh.textContent = 'Ospiti in recupero ('+guests.length+')';
+          attListHost.appendChild(gh);
+          guests.forEach(g=>{
+            const row = document.createElement('div'); row.className='list-row';
+            row.innerHTML = `<span>${esc(g.rec.name)} · ${esc(g.rec.fromCourse||'')}</span><span class="pill">${g.rec.status==='present'?'Presente':(g.rec.status==='absent'?'Assente':'Proposto')}</span>`;
+            attListHost.appendChild(row);
+          });
+        }
       }
     }
   }
 
   // Pannello assenze e inviti al recupero (admin o maestro del corso)
-  if(state.absencesCourseId && state.courses[state.absencesCourseId]){
+  if(state.absencesCourseId && state.courses[state.absencesCourseId] && state.absencesCourseId===state.selectedCourseId){
     const cid = state.absencesCourseId;
     const course = state.courses[cid];
     if(state.isAdmin || isTeacherOfCourse(cid)){
@@ -1728,20 +2530,19 @@ function renderCorsiScreen(host){
       if(detailHost){
         const enrollments = Object.entries(state.courseEnrollments[cid]||{});
         const history = state.courseAttendanceByCourse[cid] || {};
+        loadCourseRecoveries(cid);
         const stats = enrollments.map(([eid,e])=>{
-          let absences = 0, presences = 0;
-          Object.values(history).forEach(dayMap=>{
-            if(dayMap[eid]===false) absences++;
-            else if(dayMap[eid]===true) presences++;
-          });
-          return { eid, e, absences, presences };
-        }).sort((a,b)=>b.absences-a.absences);
+          let presences = 0;
+          Object.values(history).forEach(dayMap=>{ if(dayMap[eid]===true) presences++; });
+          const bl = enrolleeBacklog(cid, eid);
+          return { eid, e, absences: bl.absences, recovered: bl.recovered, owed: bl.owed, presences };
+        }).sort((a,b)=>b.owed-a.owed || b.absences-a.absences);
 
         const box = document.createElement('div');
         box.style.marginTop = '12px'; box.style.borderTop='1px solid var(--line)'; box.style.paddingTop='12px';
         box.innerHTML = `
           <div class="section-title">Assenze — ${course.name} (${course.livello||''})</div>
-          <div class="hint" style="margin-bottom:8px;">Ordinati per numero di assenze registrate.</div>
+          <div class="hint" style="margin-bottom:8px;">Ordinati per ore ancora da recuperare (assenze meno recuperi confermati dal maestro).</div>
           <div id="absenceList-${cid}"></div>
         `;
         detailHost.appendChild(box);
@@ -1749,14 +2550,14 @@ function renderCorsiScreen(host){
         if(!stats.length){ listHost.innerHTML = `<div class="hint">Nessun dato di presenza ancora registrato.</div>`; }
         stats.forEach(st=>{
           const row = document.createElement('div'); row.className='list-row';
-          row.innerHTML = `<span>${st.e.name}</span><span class="pill" style="${st.absences>0?'color:var(--danger);border-color:var(--danger);':''}">${st.absences} assenze · ${st.presences} presenze</span>`;
-          if(st.absences>0 && st.e.phone){
+          row.innerHTML = `<span>${esc(st.e.name)}</span><span class="pill" style="${st.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${st.absences} assenze · ${st.recovered} recuperate · ${st.presences} presenze</span>`;
+          if(st.owed>0 && st.e.phone){
             const waBtn = document.createElement('button');
             waBtn.className='small-btn'; waBtn.style.padding='6px 10px'; waBtn.style.fontSize='11px';
             waBtn.textContent = 'Invita al recupero';
             waBtn.onclick = () => {
               const digits = normalizePhone(st.e.phone);
-              const msg = `Ciao ${st.e.name}, dal ${CLUB_NAME}: abbiamo notato ${st.absences} assenze nel corso "${course.name}" (livello ${course.livello||'-'}). Ti va di recuperare una lezione? Facci sapere quando sei disponibile!`;
+              const msg = `Ciao ${st.e.name}, dal ${CLUB_NAME}: hai ${st.owed} ${st.owed===1?'lezione':'lezioni'} da recuperare nel corso "${course.name}" (livello ${course.livello||'-'}). Ti va di recuperare una lezione? Facci sapere quando sei disponibile!`;
               window.open(`https://wa.me/${digits}?text=${encodeURIComponent(msg)}`, '_blank');
             };
             row.appendChild(waBtn);
@@ -1768,17 +2569,23 @@ function renderCorsiScreen(host){
   }
 
   if(state.isAdmin){
+    const resetDraft = () => { state.draftSessions = [{ weekday: 1, hour: OPEN_HOUR, courtId: state.club.courts[0].id }]; };
+    const closeForm = () => { state.showCourseForm = false; state.editCourseId = null; state.courseForm = null; delete state.pickers.teacher; resetDraft(); };
+    const newBtn = screen.querySelector('#newCourseBtn');
+    if(newBtn) newBtn.onclick = () => { state.showCourseForm = true; state.editCourseId = null; state.courseForm = null; delete state.pickers.teacher; resetDraft(); renderApp(); };
+    const cancelBtn = screen.querySelector('#cancelCourseBtn');
+    if(cancelBtn) cancelBtn.onclick = () => { closeForm(); renderApp(); };
     const createBtn = screen.querySelector('#createCourseBtn');
     if(createBtn) createBtn.onclick = async () => {
       const name = screen.querySelector('#cName').value.trim();
       const livello = screen.querySelector('#cLevel').value;
-      const teacherUid = screen.querySelector('#cTeacher').value;
+      const teacherUid = (state.pickers.teacher||{}).value || '';
       const teacherName = teacherUid ? (allLinkedMembers.find(([_,m])=>m.uid===teacherUid)||[])[1]?.name : '';
       const startDate = screen.querySelector('#cStart').value;
       const endDate = screen.querySelector('#cEnd').value;
       const maxSeats = parseInt(screen.querySelector('#cMax').value,10) || 8;
       const monthlyFee = parseFloat(screen.querySelector('#cFee').value) || 0;
-      const sessions = state.draftSessions.map(s=>({ weekday:s.weekday, hour:s.hour, courtId:s.courtId }));
+      const sessions = state.draftSessions.map(x=>({ weekday:x.weekday, hour:x.hour, courtId:x.courtId }));
       if(!name) return toast('Inserisci il nome del corso');
       if(!startDate || !endDate){ toast('Inserisci data inizio e fine'); return; }
       if(!sessions.length){ toast('Aggiungi almeno un giorno'); return; }
@@ -1786,14 +2593,26 @@ function renderCorsiScreen(host){
         if(teacherUid && !state.teachers[teacherUid]){
           await set(ref(db, cpath('teachers/'+teacherUid)), true);
         }
-        const newRef = push(ref(db, cpath('courses')));
-        await set(newRef, {
-          name, livello, teacherUid: teacherUid||null, teacherName: teacherName||'',
-          sessions, startDate, endDate, maxSeats, monthlyFee,
-          enrolledCount: 0, createdAt: Date.now()
-        });
-        state.draftSessions = [{ weekday: 1, hour: OPEN_HOUR, courtId: state.club.courts[0].id }];
-        toast('Corso creato');
+        if(edCourse){
+          const enrolled = edCourse.enrolledCount || 0;
+          if(maxSeats < enrolled){ toast('I posti massimi non possono essere meno degli iscritti ('+enrolled+')'); return; }
+          await update(ref(db, cpath('courses/'+state.editCourseId)), {
+            name, livello, teacherUid: teacherUid||null, teacherName: teacherName||'',
+            sessions, startDate, endDate, maxSeats, monthlyFee
+          });
+          toast('Corso aggiornato');
+        } else {
+          const newRef = push(ref(db, cpath('courses')));
+          await set(newRef, {
+            name, livello, teacherUid: teacherUid||null, teacherName: teacherName||'',
+            sessions, startDate, endDate, maxSeats, monthlyFee,
+            enrolledCount: 0, createdAt: Date.now()
+          });
+          state.selectedCourseId = newRef.key;
+          toast('Corso creato');
+        }
+        closeForm();
+        renderApp();
       }catch(e){ toast('Errore: '+e.message); }
     };
   }
@@ -1822,14 +2641,14 @@ function renderMaestroScreen(host){
 
   // Recuperi suggeriti, solo per i corsi che questo maestro tiene
   myCourses.forEach(([cid])=>{ loadCourseEnrollments(cid); loadCourseAttendanceAll(cid); });
+  Object.keys(state.courses||{}).forEach(id=>loadCourseRecoveries(id));
   const absenceThresholdMaestro = (state.club && state.club.absenceThreshold) || 2;
   const recuperiSuggeriti = [];
   myCourses.forEach(([cid,c])=>{
     const enrollments = Object.entries(state.courseEnrollments[cid]||{});
     const history = state.courseAttendanceByCourse[cid] || {};
     enrollments.forEach(([eid,e])=>{
-      let absences = 0;
-      Object.values(history).forEach(dayMap=>{ if(dayMap[eid]===false) absences++; });
+      const absences = enrolleeBacklog(cid, eid).owed;
       if(absences >= absenceThresholdMaestro){
         const alt = Object.entries(state.courses||{}).find(([cid2,c2])=>
           cid2!==cid && c2.livello===c.livello && (c2.enrolledCount||0) < c2.maxSeats
@@ -1850,7 +2669,7 @@ function renderMaestroScreen(host){
       if(dateStr < c.startDate || dateStr > c.endDate) return;
       getCourseSessions(c).filter(s=>s.weekday===dow).forEach(s=>{
         const court = (state.club.courts||[]).find(x=>x.id===s.courtId);
-        sessions.push({ hour: s.hour, courtName: court?court.name:'', courseName: c.name, enrolled: c.enrolledCount||0 });
+        sessions.push({ cid, dateStr, hour: s.hour, courtName: court?court.name:'', courseName: c.name, enrolled: c.enrolledCount||0 });
       });
     });
     sessions.sort((a,b)=>a.hour-b.hour);
@@ -1880,7 +2699,7 @@ function renderMaestroScreen(host){
     ${myCourses.length ? `
     <div class="card">
       <div class="section-title">Recuperi suggeriti (${recuperiSuggeriti.length})</div>
-      <div class="hint" style="margin-bottom:8px;">Corsisti dei tuoi corsi con almeno ${absenceThresholdMaestro} assenze, con un corso alternativo dello stesso livello e posti liberi (se esiste).</div>
+      <div class="hint" style="margin-bottom:8px;">Corsisti dei tuoi corsi con almeno ${absenceThresholdMaestro} ore da recuperare, con un corso alternativo dello stesso livello e posti liberi (se esiste).</div>
       <div id="recuperiList">${recuperiSuggeriti.length ? '' : '<div class="hint">Nessun recupero da proporre al momento.</div>'}</div>
     </div>` : ''}
   `;
@@ -1916,6 +2735,24 @@ function renderMaestroScreen(host){
       const row = document.createElement('div'); row.className='list-row';
       row.innerHTML = `<span>${String(s.hour).padStart(2,'0')}:00 · ${s.courtName} · ${s.courseName} <span class="pill" style="padding:2px 7px;">corso</span></span><span class="pill">${s.enrolled} iscritti</span>`;
       sessionsHost.appendChild(row);
+      const hl = lessonHoles(s.cid, d.dateStr);
+      const rs = state.recoverySession;
+      const isOpen = !!rs && rs.cid===s.cid && rs.date===d.dateStr && rs.hour===s.hour;
+      const tog = document.createElement('button');
+      tog.className = 'btn-ghost';
+      tog.style.cssText = 'width:100%;margin:6px 0 10px;padding:9px;font-size:12px;';
+      tog.textContent = (isOpen ? 'Chiudi presenze e recuperi' : 'Presenze e recuperi') + (hl.holes>0 ? ' · '+hl.holes+(hl.holes===1?' posto da riempire':' posti da riempire') : '');
+      tog.onclick = () => {
+        state.recoverySession = isOpen ? null : { cid:s.cid, date:d.dateStr, hour:s.hour };
+        state.recoLimit = 15; state.recoScroll = 0; state.recoSearch = ''; state.recoAll = false;
+        renderApp();
+      };
+      sessionsHost.appendChild(tog);
+      if(isOpen){
+        const panel = buildRecoveryPanel(s.cid, d.dateStr, s.hour);
+        sessionsHost.appendChild(panel);
+        if(panel._restore) panel._restore();
+      }
     });
   });
 
@@ -1923,7 +2760,7 @@ function renderMaestroScreen(host){
   if(recuperiHost){
     recuperiSuggeriti.forEach(r=>{
       const row = document.createElement('div'); row.className='list-row';
-      row.innerHTML = `<span>${r.student.name} · ${r.course.name} (${r.absences} assenze)${r.alt?' · consigliato: '+r.alt.name:' · nessun corso alternativo dello stesso livello con posti liberi'}</span>`;
+      row.innerHTML = `<span>${r.student.name} · ${r.course.name} (${r.absences} ore da recuperare)${r.alt?' · consigliato: '+r.alt.name:' · nessun corso alternativo dello stesso livello con posti liberi'}</span>`;
       if(r.student.phone){
         const waBtn = document.createElement('button');
         waBtn.className='small-btn'; waBtn.style.padding='6px 10px'; waBtn.style.fontSize='11px';
@@ -1933,7 +2770,7 @@ function renderMaestroScreen(host){
           const altText = r.alt
             ? `Ti proponiamo di recuperare nel corso "${r.alt.name}" (${r.alt.livello||''}).`
             : `Contattaci per trovare insieme l'orario migliore per recuperare.`;
-          const msg = `Ciao ${r.student.name}, dal ${CLUB_NAME}: abbiamo notato ${r.absences} assenze nel corso "${r.course.name}" (${r.course.livello||''}). ${altText}`;
+          const msg = `Ciao ${r.student.name}, dal ${CLUB_NAME}: hai ${r.absences} ${r.absences===1?'lezione':'lezioni'} da recuperare nel corso "${r.course.name}" (${r.course.livello||''}). ${altText}`;
           window.open(`https://wa.me/${digits}?text=${encodeURIComponent(msg)}`, '_blank');
         };
         row.appendChild(waBtn);
