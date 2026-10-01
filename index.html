@@ -225,7 +225,7 @@ function findLoyaltyBand(dateStr, hour){
 }
 
 function cpath(p){ return 'clubs/'+CLUB_PATH+(p?('/'+p):''); }
-function dateKey(d){ return d.toISOString().slice(0,10); }
+function dateKey(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); } // data LOCALE (toISOString usava UTC e sfasava il giorno)
 function mondayOf(dateStr){
   const d = new Date(dateStr+'T00:00:00');
   const day = d.getDay();
@@ -1198,6 +1198,18 @@ function attendanceCutoff(date, hour){
   return new Date(y, m-1, d, Math.min(ATTENDANCE_CUTOFF_HOUR, hour), 0, 0);
 }
 
+function lessonsHeld(course){
+  const today = todayKey();
+  const end = course.endDate < today ? course.endDate : today;
+  let n = 0, k = course.startDate, guard = 0;
+  while(k && k <= end && guard++ < 800){ if(isSessionOnDate(course, k)) n++; k = addDays(k, 1); }
+  return n;
+}
+function countAbsences(course, hist, eid){
+  let a = 0;
+  Object.entries(hist||{}).forEach(([date, dm])=>{ if(dm && dm[eid]===false && date<=todayKey()) a++; });
+  return a;
+}
 const myAttListeners = new Set();
 function loadMyAttendance(cid, date, eid){
   const key = cid+'|'+date+'|'+eid;
@@ -1304,13 +1316,13 @@ function attendanceButtons(cid, date, eid, cur){
   wrap.className = 'pay-opts';
   [[true,'Presente','on-paid'],[false,'Assente','on-due']].forEach(([val,lab,cls])=>{
     const b = document.createElement('button');
-    b.className = 'small-btn' + (cur===val ? ' '+cls : '');
+    const effective = (cur===undefined || cur===null) ? true : cur; // default: presente
+    b.className = 'small-btn' + (effective===val ? ' '+cls : '');
     b.style.padding = '6px 10px'; b.style.fontSize = '11px';
     b.textContent = lab;
     b.onclick = async () => {
       try{
-        if(cur===val) await remove(ref(db, cpath('courseAttendance/'+cid+'/'+date+'/'+eid)));
-        else await set(ref(db, cpath('courseAttendance/'+cid+'/'+date+'/'+eid)), val);
+        if(effective!==val) await set(ref(db, cpath('courseAttendance/'+cid+'/'+date+'/'+eid)), val);
       }catch(err){ toast('Errore: '+err.message); }
     };
     wrap.appendChild(b);
@@ -2389,8 +2401,7 @@ function renderCorsiScreen(host){
     loadCourseAttendanceAll(cid); loadMyRecoveries(cid, myEid2);
     let statsHtml = '';
     if(state.courseAttendanceByCourse[cid] !== undefined && myEid2){
-      let presences = 0;
-      Object.values(state.courseAttendanceByCourse[cid]||{}).forEach(dm=>{ if(dm && dm[myEid2]===true) presences++; });
+      const presences = Math.max(0, lessonsHeld(c) - countAbsences(c, state.courseAttendanceByCourse[cid], myEid2));
       const bl = enrolleeBacklog(cid, myEid2);
       statsHtml = `<div class="list-row"><span>Presenze</span><span class="pill">${presences}</span></div>
         <div class="list-row" style="flex-wrap:wrap;gap:4px 8px;"><span>Assenze</span><span class="pill" style="${bl.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${bl.absences} · recuperate ${bl.recovered} · da recuperare ${bl.owed}</span></div>`;
@@ -2464,11 +2475,12 @@ function renderCorsiScreen(host){
         <div class="hint" style="margin-bottom:8px;">Prossima lezione: <b style="color:var(--chalk);">${WEEKDAY_FULL[new Date(nl.date+'T00:00:00').getDay()]} ${fmtDateDisplay(nl.date)} · ${String(nl.hour).padStart(2,'0')}:00</b></div>
         ${canDeclare ? `
           <div class="btn-row">
-            <button class="${myStatus===true?'btn-primary':'btn-ghost'}" data-act="myatt" data-v="1" data-cid="${cid}">Ci sarò</button>
-            <button class="${myStatus===false?'btn-clay':'btn-ghost'}" data-act="myatt" data-v="0" data-cid="${cid}">Non ci sarò</button>
+            ${myStatus===false
+              ? `<button class="btn-primary" data-act="myatt" data-v="1" data-cid="${cid}">Ci sarò</button>`
+              : `<button class="btn-clay" data-act="myatt" data-v="0" data-cid="${cid}">Non ci sarò</button>`}
           </div>
-          <div class="hint" style="margin-top:6px;">Puoi inviare o cambiare la risposta fino alle ${ATTENDANCE_CUTOFF_HOUR}:00 del giorno della lezione.</div>`
-        : `<div class="hint">${myStatus===true?'✓ Hai confermato la presenza.':(myStatus===false?'Hai segnalato che non ci sarai.':'Non hai inviato la presenza.')} Le risposte sono chiuse: per cambiare rivolgiti al maestro.</div>`}
+          <div class="hint" style="margin-top:6px;">${myStatus===false?'Hai segnalato che non ci sarai.':'Sei segnato come presente.'} Puoi cambiare fino alle ${ATTENDANCE_CUTOFF_HOUR}:00 del giorno della lezione.</div>`
+        : `<div class="hint">${myStatus===false?'Hai segnalato che non ci sarai.':'✓ Sei segnato come presente.'} Le risposte sono chiuse: per cambiare rivolgiti al maestro.</div>`}
       </div>` : ''}
       ${actionsHtml}
       <div class="course-detail" id="detail-${cid}"></div>
@@ -2487,7 +2499,7 @@ function renderCorsiScreen(host){
       const v = btn.dataset.v === '1';
       try{
         await set(ref(db, cpath('courseAttendance/'+cid+'/'+nl.date+'/'+eid)), v);
-        toast(v ? 'Presenza confermata, grazie!' : 'Assenza segnalata');
+        toast(v ? 'Di nuovo presente, grazie!' : 'Assenza segnalata');
       }catch(e){ toast('Errore: '+e.message); }
     };
   });
@@ -2711,8 +2723,7 @@ function renderCorsiScreen(host){
         const history = state.courseAttendanceByCourse[cid] || {};
         loadCourseRecoveries(cid);
         const stats = enrollments.map(([eid,e])=>{
-          let presences = 0;
-          Object.values(history).forEach(dayMap=>{ if(dayMap[eid]===true) presences++; });
+          const presences = Math.max(0, lessonsHeld(course) - countAbsences(course, history, eid));
           const bl = enrolleeBacklog(cid, eid);
           return { eid, e, absences: bl.absences, recovered: bl.recovered, owed: bl.owed, presences };
         }).sort((a,b)=>b.owed-a.owed || b.absences-a.absences);
