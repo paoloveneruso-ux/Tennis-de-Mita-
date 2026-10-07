@@ -1176,7 +1176,12 @@ function renderPaymentsScreen(host){
 }
 
 /* ================= Presenze con orario limite + recuperi lezioni ================= */
-const ATTENDANCE_CUTOFF_HOUR = 13; // i corsisti possono inviare/cambiare la presenza fino alle 13:00 del giorno della lezione
+const ATTENDANCE_CUTOFF_DEFAULT_HOUR = 13; // default: i corsisti possono inviare/cambiare la presenza fino alle 13:00 del giorno della lezione
+function getAttendanceCutoffHour(){ // configurabile dall'admin (info/attendanceCutoffHour)
+  const raw = state.club ? state.club.attendanceCutoffHour : null;
+  const h = Number(raw);
+  return (raw!=null && Number.isInteger(h) && h>=0 && h<=23) ? h : ATTENDANCE_CUTOFF_DEFAULT_HOUR;
+}
 function nowDate(){ return state.debugNow ? new Date(state.debugNow) : new Date(); }
 function nextLesson(course){
   const now = nowDate();
@@ -1195,7 +1200,7 @@ function nextLesson(course){
 }
 function attendanceCutoff(date, hour){
   const [y,m,d] = date.split('-').map(Number);
-  return new Date(y, m-1, d, Math.min(ATTENDANCE_CUTOFF_HOUR, hour), 0, 0);
+  return new Date(y, m-1, d, Math.min(getAttendanceCutoffHour(), hour), 0, 0);
 }
 
 function lessonsHeld(course){
@@ -1220,6 +1225,104 @@ function loadMyAttendance(cid, date, eid){
     renderCurrent();
   }, err=>console.error('myAttendance', err));
 }
+
+/* ===== Calendario settimanale: il corsista gestisce le assenze di tutte le sue lezioni ===== */
+function myWeekLessons(monday){
+  const out = [];
+  Object.entries(state.myEnrollments||{}).forEach(([cid,eid])=>{
+    const c = state.courses && state.courses[cid];
+    if(!c || !eid) return;
+    for(let i=0;i<7;i++){
+      const date = addDays(monday, i);
+      if(date < c.startDate || date > c.endDate) continue;
+      const dow = new Date(date+'T00:00:00').getDay();
+      getCourseSessions(c).filter(x=>x.weekday===dow).forEach(x=>{
+        out.push({ cid, eid, date, hour:x.hour, courtId:x.courtId, name:c.name });
+      });
+    }
+  });
+  return out.sort((a,b)=> a.date.localeCompare(b.date) || a.hour-b.hour);
+}
+function renderWeekAttendanceCard(host){
+  if(!host) return;
+  const enrolled = Object.keys(state.myEnrollments||{}).filter(cid=>state.courses && state.courses[cid]);
+  if(!enrolled.length) return;
+  const now = nowDate();
+  const thisMonday = mondayOf(dateKey(now));
+  if(!state.weekAttMonday || state.weekAttMonday < thisMonday) state.weekAttMonday = thisMonday;
+  const monday = state.weekAttMonday;
+  const lessons = myWeekLessons(monday);
+  lessons.forEach(l=>loadMyAttendance(l.cid, l.date, l.eid));
+  const pad = h => String(h).padStart(2,'0')+':00';
+  const cutoffTxt = pad(getAttendanceCutoffHour());
+
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = `
+    <div class="section-title">Le tue lezioni della settimana</div>
+    <div class="btn-row" style="align-items:center;margin-bottom:6px;">
+      <button class="btn-ghost" id="weekAttPrev" ${monday<=thisMonday?'disabled style="opacity:.4;"':''}>‹</button>
+      <div class="hint" style="text-align:center;flex:1;">${fmtDateDisplay(monday)} → ${fmtDateDisplay(addDays(monday,6))}</div>
+      <button class="btn-ghost" id="weekAttNext">›</button>
+    </div>
+    <div class="hint" style="margin-bottom:8px;">Sei presente di default. Tocca "Non ci sarò" per segnalare un'assenza, entro le ${cutoffTxt} del giorno della lezione.</div>
+    <div id="weekAttDays"></div>`;
+  const daysHost = card.querySelector('#weekAttDays');
+  for(let i=0;i<7;i++){
+    const date = addDays(monday, i);
+    const dow = new Date(date+'T00:00:00').getDay();
+    const dayLessons = lessons.filter(l=>l.date===date);
+    const dayEl = document.createElement('div');
+    dayEl.style.cssText = 'border-top:1px solid var(--line);padding:8px 0;'+(date===dateKey(now)?'':'');
+    dayEl.innerHTML = `<div style="font-weight:600;color:var(--chalk);${dayLessons.length?'':'opacity:.5;'}">${WEEKDAY_FULL[dow]} ${fmtDateDisplay(date).slice(0,5)}${date===dateKey(now)?' · oggi':''}</div>`;
+    if(!dayLessons.length){
+      const e = document.createElement('div'); e.className='hint'; e.style.opacity='.5'; e.textContent='Nessuna lezione';
+      dayEl.appendChild(e);
+    }
+    dayLessons.forEach(l=>{
+      const st = state.myAttendance[l.cid+'|'+l.date];
+      const absent = st === false;
+      const open = now < attendanceCutoff(l.date, l.hour);
+      const court = ((state.club.courts||[]).find(x=>x.id===l.courtId)||{}).name || '';
+      const row = document.createElement('div');
+      row.className = 'list-row';
+      row.style.cssText = 'flex-wrap:wrap;gap:6px 8px;align-items:center;';
+      const info = document.createElement('span');
+      info.style.cssText = 'min-width:0;flex:1;';
+      info.innerHTML = `<b style="color:var(--chalk);">${pad(l.hour)}</b> · ${esc(l.name)}${court?' · '+esc(court):''}`;
+      row.appendChild(info);
+      if(open){
+        const b = document.createElement('button');
+        b.className = absent ? 'btn-primary' : 'btn-clay';
+        b.style.cssText = 'padding:8px 12px;';
+        b.textContent = absent ? 'Ci sarò' : 'Non ci sarò';
+        b.onclick = async () => {
+          if(nowDate() >= attendanceCutoff(l.date, l.hour)){ toast('Tempo scaduto: rivolgiti al maestro'); renderApp(); return; }
+          try{
+            await set(ref(db, cpath('courseAttendance/'+l.cid+'/'+l.date+'/'+l.eid)), absent);
+            toast(absent ? 'Di nuovo presente, grazie!' : 'Assenza segnalata');
+          }catch(e){ toast('Errore: '+e.message); }
+        };
+        if(absent){
+          const pill = document.createElement('span'); pill.className='pill'; pill.style.cssText='color:var(--danger);border-color:var(--danger);'; pill.textContent='Assente';
+          row.appendChild(pill);
+        }
+        row.appendChild(b);
+      } else {
+        const pill = document.createElement('span'); pill.className='pill';
+        if(absent) pill.style.cssText='color:var(--danger);border-color:var(--danger);';
+        pill.textContent = (absent ? 'Assente' : 'Presente') + ' · chiuso';
+        row.appendChild(pill);
+      }
+      dayEl.appendChild(row);
+    });
+    daysHost.appendChild(dayEl);
+  }
+  card.querySelector('#weekAttPrev').onclick = () => { if(state.weekAttMonday > thisMonday){ state.weekAttMonday = addDays(state.weekAttMonday,-7); renderApp(); } };
+  card.querySelector('#weekAttNext').onclick = () => { state.weekAttMonday = addDays(state.weekAttMonday,7); renderApp(); };
+  host.replaceChildren(card);
+}
+
 const myRecoListeners = new Set();
 function loadMyRecoveries(cid, eid){
   if(!eid) return;
@@ -2291,7 +2394,7 @@ function renderCorsiScreen(host){
     .filter(([cid])=> canSeeAllCourses || state.myEnrollments[cid])
     .sort((a,b)=>{
       const sa = getCourseSessions(a[1])[0]||{weekday:0,hour:0}, sb = getCourseSessions(b[1])[0]||{weekday:0,hour:0};
-      return (sa.weekday-sb.weekday) || (sa.hour-sb.hour);
+      return ((sa.weekday||7)-(sb.weekday||7)) || (sa.hour-sb.hour);
     });
   const allLinkedMembers = Object.entries(state.members||{}).filter(([_,m])=>m.uid);
   if(!state.draftSessions[0].courtId && state.club.courts && state.club.courts[0]) state.draftSessions[0].courtId = state.club.courts[0].id;
@@ -2311,6 +2414,7 @@ function renderCorsiScreen(host){
   screen.className = 'screen';
   screen.innerHTML = `
     ${state.isAdmin ? corsiSwitchHtml() : ''}
+    <div id="weekAttHost"></div>
     ${courseList.length ? `<div class="card"><div class="field"><label>Scegli il corso</label>
       <select id="courseSelect"><option value="">— seleziona un corso —</option>${courseList.map(([cid,c])=>`<option value="${cid}" ${cid===state.selectedCourseId?'selected':''}>${q(c.name)}</option>`).join('')}</select></div></div>` : ''}
     <div id="courseCards"></div>
@@ -2338,6 +2442,7 @@ function renderCorsiScreen(host){
   `;
   host.replaceChildren(screen);
   bindCorsiSwitch(screen);
+  renderWeekAttendanceCard(screen.querySelector('#weekAttHost'));
 
   function captureCourseForm(){
     if(!screen.querySelector('#cName')) return;
@@ -2364,7 +2469,7 @@ function renderCorsiScreen(host){
           <select data-i="${i}" class="dsCourt">${(state.club.courts||[]).map(c=>`<option value="${c.id}" ${c.id===s.courtId?'selected':''}>${c.name}</option>`).join('')}</select>
         </div>
         <div class="field" style="margin-top:6px;"><label>Giorno</label>
-          <select data-i="${i}" class="dsWeekday">${WEEKDAY_FULL.map((w,wi)=>`<option value="${wi}" ${wi===s.weekday?'selected':''}>${w}</option>`).join('')}</select>
+          <select data-i="${i}" class="dsWeekday">${[1,2,3,4,5,6,0].map(wi=>`<option value="${wi}" ${wi===s.weekday?'selected':''}>${WEEKDAY_FULL[wi]}</option>`).join('')}</select>
         </div>
         <div class="field" style="margin-top:6px;"><label>Ora</label>
           <select data-i="${i}" class="dsHour">${Array.from({length:CLOSE_HOUR-OPEN_HOUR},(_,hi)=>{const h=OPEN_HOUR+hi;return `<option value="${h}" ${h===s.hour?'selected':''}>${String(h).padStart(2,'0')}:00</option>`;}).join('')}</select>
@@ -2479,7 +2584,7 @@ function renderCorsiScreen(host){
               ? `<button class="btn-primary" data-act="myatt" data-v="1" data-cid="${cid}">Ci sarò</button>`
               : `<button class="btn-clay" data-act="myatt" data-v="0" data-cid="${cid}">Non ci sarò</button>`}
           </div>
-          <div class="hint" style="margin-top:6px;">${myStatus===false?'Hai segnalato che non ci sarai.':'Sei segnato come presente.'} Puoi cambiare fino alle ${ATTENDANCE_CUTOFF_HOUR}:00 del giorno della lezione.</div>`
+          <div class="hint" style="margin-top:6px;">${myStatus===false?'Hai segnalato che non ci sarai.':'Sei segnato come presente.'} Puoi cambiare fino alle ${String(getAttendanceCutoffHour()).padStart(2,'0')}:00 del giorno della lezione.</div>`
         : `<div class="hint">${myStatus===false?'Hai segnalato che non ci sarai.':'✓ Sei segnato come presente.'} Le risposte sono chiuse: per cambiare rivolgiti al maestro.</div>`}
       </div>` : ''}
       ${actionsHtml}
@@ -3356,6 +3461,15 @@ function renderAdminScreen(host){
     </div>
 
     <div class="card">
+      <div class="section-title">Assenze ai corsi — orario limite</div>
+      <div class="hint" style="margin-bottom:8px;">Ora massima, nel giorno della lezione, entro cui i corsisti possono segnalare (o annullare) la propria assenza. Se la lezione inizia prima di quest'ora, il limite è l'inizio della lezione.</div>
+      <div class="field"><label>Orario limite</label>
+        <select id="attCutoffHour">${Array.from({length:24},(_,h)=>`<option value="${h}" ${h===getAttendanceCutoffHour()?'selected':''}>${String(h).padStart(2,'0')}:00</option>`).join('')}</select>
+      </div>
+      <button class="btn-ghost" id="saveAttCutoffBtn" style="width:100%;">Salva orario limite</button>
+    </div>
+
+    <div class="card">
       <div class="section-title">Notifica WhatsApp per ore liberate</div>
       <div class="hint" style="margin-bottom:8px;">Quando annulli una prenotazione dall'elenco qui sopra, potrai inviare un messaggio pronto al tuo gruppo WhatsApp con i dettagli dell'ora liberata.</div>
       <div class="field"><label>Nome gruppo WhatsApp (promemoria, WhatsApp non permette di sceglierlo dall'app)</label><input id="waGroupName" value="${state.club.whatsappGroupName||''}" placeholder="Es. Soci TC Lello de Mita"></div>
@@ -3713,6 +3827,15 @@ function renderAdminScreen(host){
     row.appendChild(btn);
     teacherListHost.appendChild(row);
   });
+
+  screen.querySelector('#saveAttCutoffBtn').onclick = async () => {
+    const h = parseInt(screen.querySelector('#attCutoffHour').value, 10);
+    if(!Number.isInteger(h) || h<0 || h>23) return toast('Orario non valido');
+    try{
+      await update(ref(db, cpath('info')), { attendanceCutoffHour: h });
+      toast('Orario limite assenze salvato: '+String(h).padStart(2,'0')+':00');
+    }catch(e){ toast('Errore: '+e.message); }
+  };
 
   screen.querySelector('#saveWaBtn').onclick = async () => {
     const template = screen.querySelector('#waTemplate').value.trim();
