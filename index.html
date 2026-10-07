@@ -2415,6 +2415,14 @@ function renderCorsiScreen(host){
   screen.innerHTML = `
     ${state.isAdmin ? corsiSwitchHtml() : ''}
     <div id="weekAttHost"></div>
+    ${state.isAdmin ? `<div class="card">
+      <div class="section-title">Orario limite assenze</div>
+      <div class="hint" style="margin-bottom:8px;">Ora massima, nel giorno della lezione, entro cui i corsisti possono segnalare o annullare la propria assenza. Se la lezione inizia prima, vale l'inizio della lezione.</div>
+      <div class="btn-row" style="align-items:center;">
+        <select id="attCutoffHour" style="flex:1;">${Array.from({length:24},(_,h)=>`<option value="${h}" ${h===getAttendanceCutoffHour()?'selected':''}>${String(h).padStart(2,'0')}:00</option>`).join('')}</select>
+        <button class="btn-primary" id="saveAttCutoffBtn">Salva</button>
+      </div>
+    </div>` : ''}
     ${courseList.length ? `<div class="card"><div class="field"><label>Scegli il corso</label>
       <select id="courseSelect"><option value="">— seleziona un corso —</option>${courseList.map(([cid,c])=>`<option value="${cid}" ${cid===state.selectedCourseId?'selected':''}>${q(c.name)}</option>`).join('')}</select></div></div>` : ''}
     <div id="courseCards"></div>
@@ -2443,6 +2451,15 @@ function renderCorsiScreen(host){
   host.replaceChildren(screen);
   bindCorsiSwitch(screen);
   renderWeekAttendanceCard(screen.querySelector('#weekAttHost'));
+  const cutoffBtn = screen.querySelector('#saveAttCutoffBtn');
+  if(cutoffBtn) cutoffBtn.onclick = async () => {
+    const h = parseInt(screen.querySelector('#attCutoffHour').value, 10);
+    if(!Number.isInteger(h) || h<0 || h>23) return toast('Orario non valido');
+    try{
+      await update(ref(db, cpath('info')), { attendanceCutoffHour: h });
+      toast('Orario limite assenze: '+String(h).padStart(2,'0')+':00');
+    }catch(e){ toast('Errore: '+e.message); }
+  };
 
   function captureCourseForm(){
     if(!screen.querySelector('#cName')) return;
@@ -3445,28 +3462,24 @@ function renderAdminScreen(host){
       <div class="section-title">Gestione soci</div>
       <div class="field"><label>Aggiungi socio</label><input id="addMemberName" placeholder="Nome e cognome"></div>
       <button class="btn-ghost" id="addMemberBtn" style="width:100%;">Aggiungi socio</button>
-      <div id="memAdminList" style="margin-top:10px;"></div>
+      <div class="field" style="margin-top:10px;"><label>Rimuovi socio</label><div id="delMemberPickerHost"></div></div>
+      <button class="btn-ghost" id="delMemberBtn" style="width:100%;color:var(--danger);border-color:var(--danger);">Rimuovi socio selezionato</button>
     </div>
 
     <div class="card">
       <div class="section-title">Amministratori</div>
       <div class="hint" style="margin-bottom:8px;">Chi diventa admin può gestire tariffe, soci, blocchi e cancellare qualunque prenotazione.</div>
       <div id="adminList"></div>
+      <div class="field" style="margin-top:10px;"><label>Aggiungi amministratore</label><div id="addAdminPickerHost"></div></div>
+      <button class="btn-ghost" id="addAdminBtn" style="width:100%;">Aggiungi amministratore</button>
     </div>
 
     <div class="card">
       <div class="section-title">Maestri</div>
       <div class="hint" style="margin-bottom:8px;">Chi diventa maestro vede la tab "Maestro" con le proprie lezioni e i corsi che tiene.</div>
       <div id="teacherList"></div>
-    </div>
-
-    <div class="card">
-      <div class="section-title">Assenze ai corsi — orario limite</div>
-      <div class="hint" style="margin-bottom:8px;">Ora massima, nel giorno della lezione, entro cui i corsisti possono segnalare (o annullare) la propria assenza. Se la lezione inizia prima di quest'ora, il limite è l'inizio della lezione.</div>
-      <div class="field"><label>Orario limite</label>
-        <select id="attCutoffHour">${Array.from({length:24},(_,h)=>`<option value="${h}" ${h===getAttendanceCutoffHour()?'selected':''}>${String(h).padStart(2,'0')}:00</option>`).join('')}</select>
-      </div>
-      <button class="btn-ghost" id="saveAttCutoffBtn" style="width:100%;">Salva orario limite</button>
+      <div class="field" style="margin-top:10px;"><label>Aggiungi maestro</label><div id="addTeacherPickerHost"></div></div>
+      <button class="btn-ghost" id="addTeacherBtn" style="width:100%;">Aggiungi maestro</button>
     </div>
 
     <div class="card">
@@ -3774,67 +3787,73 @@ function renderAdminScreen(host){
     }catch(e){ toast('Errore: '+e.message); }
   };
 
-  const memAdminList = screen.querySelector('#memAdminList');
-  memberList.forEach(([id,m])=>{
-    const row = document.createElement('div'); row.className = 'member-row';
-    row.innerHTML = `<span class="name">${m.name}</span>`;
-    const del = document.createElement('button'); del.className='small-btn'; del.textContent='Rimuovi';
-    del.onclick = async () => {
-      if(confirm('Rimuovere '+m.name+" dall'anagrafica? Le sue prenotazioni restano registrate.")){
-        try{ await remove(ref(db, cpath('members/'+id))); }catch(e){ toast('Errore: '+e.message); }
-      }
-    };
-    row.appendChild(del);
-    memAdminList.appendChild(row);
-  });
+  const linkedMembers = memberList.filter(([_,m])=>m.uid);
+  const emptyHint = txt => { const e=document.createElement('div'); e.className='hint'; e.textContent=txt; return e; };
 
+  // Soci: menu a tendina con ricerca per rimuoverne uno (niente elenco lunghissimo)
+  const delHost = screen.querySelector('#delMemberPickerHost');
+  delHost.appendChild(makePicker('delMember', memberList.map(([id,m])=>({ value:id, label:m.name })), { placeholder:'Cerca socio…', noneLabel:'— scegli un socio —' }));
+  screen.querySelector('#delMemberBtn').onclick = async () => {
+    const id = (state.pickers.delMember||{}).value;
+    if(!id){ toast('Scegli prima un socio'); return; }
+    const m = state.members[id]; if(!m) return;
+    if(confirm('Rimuovere '+m.name+" dall'anagrafica? Le sue prenotazioni restano registrate.")){
+      try{ await remove(ref(db, cpath('members/'+id))); delete state.pickers.delMember; }catch(e){ toast('Errore: '+e.message); }
+    }
+  };
+
+  // Amministratori: solo gli admin attuali + menu per aggiungerne
   const adminListHost = screen.querySelector('#adminList');
   const adminCount = Object.keys(state.admins||{}).length;
-  memberList.filter(([_,m])=>m.uid).forEach(([id,m])=>{
+  const currentAdmins = linkedMembers.filter(([_,m])=>state.admins[m.uid]);
+  if(!currentAdmins.length) adminListHost.appendChild(emptyHint('Nessun amministratore collegato.'));
+  currentAdmins.forEach(([id,m])=>{
     const uid = m.uid;
-    const isAdm = !!state.admins[uid];
     const row = document.createElement('div'); row.className='member-row';
-    row.innerHTML = `<span class="name">${m.name}</span>${isAdm?'<span class="pill adminpill">Admin</span>':''}`;
+    row.innerHTML = `<span class="name">${esc(m.name)}</span><span class="pill adminpill">Admin</span>`;
     const btn = document.createElement('button');
-    btn.className = isAdm ? 'small-btn' : 'small-btn';
-    btn.textContent = isAdm ? 'Rimuovi admin' : 'Rendi admin';
+    btn.className = 'small-btn';
+    btn.textContent = 'Rimuovi admin';
     btn.onclick = async () => {
-      if(isAdm && adminCount<=1){ toast('Deve rimanere almeno un amministratore'); return; }
-      try{
-        if(isAdm) await remove(ref(db, cpath('admins/'+uid)));
-        else await set(ref(db, cpath('admins/'+uid)), true);
-      }catch(e){ toast('Errore: '+e.message); }
+      if(adminCount<=1){ toast('Deve rimanere almeno un amministratore'); return; }
+      try{ await remove(ref(db, cpath('admins/'+uid))); }catch(e){ toast('Errore: '+e.message); }
     };
     row.appendChild(btn);
     adminListHost.appendChild(row);
   });
+  screen.querySelector('#addAdminPickerHost').appendChild(makePicker('addAdmin',
+    linkedMembers.filter(([_,m])=>!state.admins[m.uid]).map(([_,m])=>({ value:m.uid, label:m.name })),
+    { placeholder:'Cerca socio…', noneLabel:'— scegli un socio —' }));
+  screen.querySelector('#addAdminBtn').onclick = async () => {
+    const uid = (state.pickers.addAdmin||{}).value;
+    if(!uid){ toast('Scegli prima un socio'); return; }
+    try{ await set(ref(db, cpath('admins/'+uid)), true); delete state.pickers.addAdmin; }catch(e){ toast('Errore: '+e.message); }
+  };
 
+  // Maestri: solo i maestri attuali + menu per aggiungerne
   const teacherListHost = screen.querySelector('#teacherList');
-  memberList.filter(([_,m])=>m.uid).forEach(([id,m])=>{
+  const currentTeachers = linkedMembers.filter(([_,m])=>state.teachers[m.uid]);
+  if(!currentTeachers.length) teacherListHost.appendChild(emptyHint('Nessun maestro.'));
+  currentTeachers.forEach(([id,m])=>{
     const uid = m.uid;
-    const isTeach = !!state.teachers[uid];
     const row = document.createElement('div'); row.className='member-row';
-    row.innerHTML = `<span class="name">${m.name}</span>${isTeach?'<span class="pill" style="border-color:var(--clay-dim);color:var(--clay);">Maestro</span>':''}`;
+    row.innerHTML = `<span class="name">${esc(m.name)}</span><span class="pill" style="border-color:var(--clay-dim);color:var(--clay);">Maestro</span>`;
     const btn = document.createElement('button');
     btn.className = 'small-btn';
-    btn.textContent = isTeach ? 'Rimuovi maestro' : 'Rendi maestro';
+    btn.textContent = 'Rimuovi maestro';
     btn.onclick = async () => {
-      try{
-        if(isTeach) await remove(ref(db, cpath('teachers/'+uid)));
-        else await set(ref(db, cpath('teachers/'+uid)), true);
-      }catch(e){ toast('Errore: '+e.message); }
+      try{ await remove(ref(db, cpath('teachers/'+uid))); }catch(e){ toast('Errore: '+e.message); }
     };
     row.appendChild(btn);
     teacherListHost.appendChild(row);
   });
-
-  screen.querySelector('#saveAttCutoffBtn').onclick = async () => {
-    const h = parseInt(screen.querySelector('#attCutoffHour').value, 10);
-    if(!Number.isInteger(h) || h<0 || h>23) return toast('Orario non valido');
-    try{
-      await update(ref(db, cpath('info')), { attendanceCutoffHour: h });
-      toast('Orario limite assenze salvato: '+String(h).padStart(2,'0')+':00');
-    }catch(e){ toast('Errore: '+e.message); }
+  screen.querySelector('#addTeacherPickerHost').appendChild(makePicker('addTeacher',
+    linkedMembers.filter(([_,m])=>!state.teachers[m.uid]).map(([_,m])=>({ value:m.uid, label:m.name })),
+    { placeholder:'Cerca socio…', noneLabel:'— scegli un socio —' }));
+  screen.querySelector('#addTeacherBtn').onclick = async () => {
+    const uid = (state.pickers.addTeacher||{}).value;
+    if(!uid){ toast('Scegli prima un socio'); return; }
+    try{ await set(ref(db, cpath('teachers/'+uid)), true); delete state.pickers.addTeacher; }catch(e){ toast('Errore: '+e.message); }
   };
 
   screen.querySelector('#saveWaBtn').onclick = async () => {
