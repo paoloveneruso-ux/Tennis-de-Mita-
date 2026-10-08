@@ -1285,6 +1285,47 @@ function lessonLabelHtml(courseName, date, hour){
   return '<b>'+esc(courseName)+'</b><br>'+WEEKDAY_FULL[dow]+' '+fmtDateDisplay(date)+(hour!=null?' · '+String(hour).padStart(2,'0')+':00':'');
 }
 
+/* Messaggio informativo con un solo pulsante */
+function askInfo({ title, text, okLabel }){
+  return new Promise(resolve=>{
+    document.querySelectorAll('.modal-overlay').forEach(el=>el.remove());
+    const ov = document.createElement('div');
+    ov.className = 'modal-overlay';
+    ov.innerHTML = `<div class="modal">
+      <h4>${esc(title)}</h4>
+      <div style="font-size:14px;line-height:1.5;color:var(--chalk);">${text}</div>
+      <div class="btn-row"><button class="btn-primary" id="ifOk">${esc(okLabel||'Ho capito')}</button></div>
+    </div>`;
+    const done = () => { ov.remove(); resolve(); };
+    ov.addEventListener('click', e=>{ if(e.target===ov) done(); });
+    ov.querySelector('#ifOk').onclick = done;
+    document.body.appendChild(ov);
+  });
+}
+
+/* Un corsista assente può tornare "presente" solo se il maestro non ha già inserito un sostituto
+   che, tornando lui, resterebbe senza posto. I sostituti inseriti sono in courseSubstitutes/{cid}/{data}. */
+async function substituteBlocksReturn(cid, date, hour){
+  try{
+    const c = state.courses[cid] || {};
+    const [subSnap, attSnap] = await Promise.all([
+      get(ref(db, cpath('courseSubstitutes/'+cid+'/'+date))),
+      get(ref(db, cpath('courseAttendance/'+cid+'/'+date)))
+    ]);
+    const subs = Object.keys(subSnap.val()||{}).length;
+    if(!subs) return false;
+    const absent = Object.values(attSnap.val()||{}).filter(v=>attGet(v,hour)===false).length;
+    const free = Math.max(0, (Number(c.maxSeats)||0) - (Number(c.enrolledCount)||0));
+    return subs >= absent + free; // tornando, il numero di posti non basterebbe per tutti i sostituti
+  }catch(e){ console.warn('substituteBlocksReturn', e); return false; }
+}
+async function warnSubstituteFound(cname, date, hour){
+  await askInfo({
+    title: 'Non puoi tornare presente',
+    text: lessonLabelHtml(cname, date, hour)+'<br><br>Il maestro ha già trovato un sostituto per questa ora. Contatta il maestro per modificare la tua assenza.'
+  });
+}
+
 /* ===== Calendario settimanale: il corsista gestisce le assenze di tutte le sue lezioni ===== */
 function myWeekLessons(monday){
   const out = [];
@@ -1357,6 +1398,7 @@ function renderWeekAttendanceCard(host){
         b.textContent = absent ? 'Ci sarò' : 'Non ci sarò';
         b.onclick = async () => {
           if(nowDate() >= attendanceCutoff(l.date, l.hour)){ toast('Tempo scaduto: rivolgiti al maestro'); renderApp(); return; }
+          if(absent && await substituteBlocksReturn(l.cid, l.date, l.hour)){ await warnSubstituteFound(l.name, l.date, l.hour); return; }
           if(!absent){
             const ok = await askConfirm({
               title: 'Confermi che non ci sarai?',
@@ -1408,6 +1450,7 @@ function loadCourseRecoveries(cid){
   recoveryListeners.add(cid);
   onValue(ref(db, cpath('courseRecoveries/'+cid)), s=>{
     state.courseRecoveries[cid] = s.val()||{};
+    backfillSubstituteMarkers();
     renderCurrent();
   }, err=>console.error('recoveries', err));
 }
@@ -1461,6 +1504,32 @@ function recoveryCandidates(toCid, date){
   });
   return out;
 }
+/* Segnalino leggibile dai corsisti del corso: "c'è un sostituto" (proposto o confermato) per quella data */
+async function syncSubstituteMarker(toCid, date, fromCid, fromEid, status){
+  const mref = ref(db, cpath('courseSubstitutes/'+toCid+'/'+date+'/'+fromCid+'_'+fromEid));
+  try{
+    if(status==='proposed' || status==='present') await set(mref, status);
+    else await remove(mref);
+  }catch(e){ console.warn('courseSubstitutes', e); }
+}
+const markerSynced = new Set();
+function backfillSubstituteMarkers(){ // per i recuperi inseriti prima di questa funzione
+  if(!(state.isAdmin || state.isTeacher)) return;
+  const today = todayKey();
+  Object.entries(state.courseRecoveries||{}).forEach(([fromCid, byEid])=>{
+    Object.entries(byEid||{}).forEach(([fromEid, recs])=>{
+      Object.values(recs||{}).forEach(rec=>{
+        if(!rec || !rec.toCid || !rec.toDate || rec.toDate < today) return;
+        if(rec.status!=='proposed' && rec.status!=='present') return;
+        if(!(state.isAdmin || isTeacherOfCourse(rec.toCid))) return;
+        const k = rec.toCid+'|'+rec.toDate+'|'+fromCid+'|'+fromEid+'|'+rec.status;
+        if(markerSynced.has(k)) return;
+        markerSynced.add(k);
+        syncSubstituteMarker(rec.toCid, rec.toDate, fromCid, fromEid, rec.status);
+      });
+    });
+  });
+}
 async function setRecovery(cd, toCid, date, status){
   const rec = {
     toCid, toDate:date, status,
@@ -1470,11 +1539,17 @@ async function setRecovery(cd, toCid, date, status){
     level: cd.level || (cd.c && cd.c.livello) || '',
     by: state.uid, ts: Date.now()
   };
-  try{ await set(ref(db, cpath('courseRecoveries/'+cd.fromCid+'/'+cd.fromEid+'/'+date+'_'+toCid)), rec); }
+  try{
+    await set(ref(db, cpath('courseRecoveries/'+cd.fromCid+'/'+cd.fromEid+'/'+date+'_'+toCid)), rec);
+    await syncSubstituteMarker(toCid, date, cd.fromCid, cd.fromEid, status);
+  }
   catch(err){ toast('Errore: '+err.message); }
 }
 async function removeRecovery(p){
-  try{ await remove(ref(db, cpath('courseRecoveries/'+p.fromCid+'/'+p.fromEid+'/'+p.rid))); }
+  try{
+    await remove(ref(db, cpath('courseRecoveries/'+p.fromCid+'/'+p.fromEid+'/'+p.rid)));
+    if(p.rec && p.rec.toCid) await syncSubstituteMarker(p.rec.toCid, p.rec.toDate, p.fromCid, p.fromEid, null);
+  }
   catch(err){ toast('Errore: '+err.message); }
 }
 function recoveryMessage(cd, toCourse, date, hour){
@@ -2707,6 +2782,7 @@ function renderCorsiScreen(host){
       if(!eid || !nl) return;
       if(nowDate() >= attendanceCutoff(nl.date, nl.hour)){ toast('Tempo scaduto: rivolgiti al maestro'); renderApp(); return; }
       const v = btn.dataset.v === '1';
+      if(v && await substituteBlocksReturn(cid, nl.date, nl.hour)){ await warnSubstituteFound(c.name, nl.date, nl.hour); return; }
       if(!v){
         const ok = await askConfirm({
           title: 'Confermi che non ci sarai?',
