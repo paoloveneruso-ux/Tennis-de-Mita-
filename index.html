@@ -1226,6 +1226,33 @@ function loadMyAttendance(cid, date, eid){
   }, err=>console.error('myAttendance', err));
 }
 
+
+/* Schermata di conferma (promise -> true/false), usata prima di registrare un'assenza */
+function askConfirm({ title, text, okLabel, okClass }){
+  return new Promise(resolve=>{
+    document.querySelectorAll('.modal-overlay').forEach(el=>el.remove());
+    const ov = document.createElement('div');
+    ov.className = 'modal-overlay';
+    ov.innerHTML = `<div class="modal">
+      <h4>${esc(title)}</h4>
+      <div style="font-size:14px;line-height:1.5;color:var(--chalk);">${text}</div>
+      <div class="btn-row">
+        <button class="btn-ghost" id="cfNo">Annulla</button>
+        <button class="${okClass||'btn-clay'}" id="cfYes">${esc(okLabel||'Conferma')}</button>
+      </div>
+    </div>`;
+    const done = v => { ov.remove(); resolve(v); };
+    ov.addEventListener('click', e=>{ if(e.target===ov) done(false); });
+    ov.querySelector('#cfNo').onclick = () => done(false);
+    ov.querySelector('#cfYes').onclick = () => done(true);
+    document.body.appendChild(ov);
+  });
+}
+function lessonLabelHtml(courseName, date, hour){
+  const dow = new Date(date+'T00:00:00').getDay();
+  return '<b>'+esc(courseName)+'</b><br>'+WEEKDAY_FULL[dow]+' '+fmtDateDisplay(date)+(hour!=null?' · '+String(hour).padStart(2,'0')+':00':'');
+}
+
 /* ===== Calendario settimanale: il corsista gestisce le assenze di tutte le sue lezioni ===== */
 function myWeekLessons(monday){
   const out = [];
@@ -1298,6 +1325,15 @@ function renderWeekAttendanceCard(host){
         b.textContent = absent ? 'Ci sarò' : 'Non ci sarò';
         b.onclick = async () => {
           if(nowDate() >= attendanceCutoff(l.date, l.hour)){ toast('Tempo scaduto: rivolgiti al maestro'); renderApp(); return; }
+          if(!absent){
+            const ok = await askConfirm({
+              title: 'Confermi che non ci sarai?',
+              text: lessonLabelHtml(l.name, l.date, l.hour)+'<br><br>Il maestro vedrà che sei <b>assente</b> a questa lezione.',
+              okLabel: 'Sì, sarò assente'
+            });
+            if(!ok) return;
+            if(nowDate() >= attendanceCutoff(l.date, l.hour)){ toast('Tempo scaduto: rivolgiti al maestro'); renderApp(); return; }
+          }
           try{
             await set(ref(db, cpath('courseAttendance/'+l.cid+'/'+l.date+'/'+l.eid)), absent);
             toast(absent ? 'Di nuovo presente, grazie!' : 'Assenza segnalata');
@@ -1425,7 +1461,17 @@ function attendanceButtons(cid, date, eid, cur){
     b.textContent = lab;
     b.onclick = async () => {
       try{
-        if(effective!==val) await set(ref(db, cpath('courseAttendance/'+cid+'/'+date+'/'+eid)), val);
+        if(effective===val) return;
+        if(val===false){
+          const en = (state.courseEnrollments[cid]||{})[eid] || {};
+          const ok = await askConfirm({
+            title: 'Segnare come assente?',
+            text: '<b>'+esc(en.name||'Corsista')+'</b><br>'+lessonLabelHtml((state.courses[cid]||{}).name||'', date, null),
+            okLabel: 'Sì, assente'
+          });
+          if(!ok) return;
+        }
+        await set(ref(db, cpath('courseAttendance/'+cid+'/'+date+'/'+eid)), val);
       }catch(err){ toast('Errore: '+err.message); }
     };
     wrap.appendChild(b);
@@ -2619,6 +2665,15 @@ function renderCorsiScreen(host){
       if(!eid || !nl) return;
       if(nowDate() >= attendanceCutoff(nl.date, nl.hour)){ toast('Tempo scaduto: rivolgiti al maestro'); renderApp(); return; }
       const v = btn.dataset.v === '1';
+      if(!v){
+        const ok = await askConfirm({
+          title: 'Confermi che non ci sarai?',
+          text: lessonLabelHtml(c.name, nl.date, nl.hour)+'<br><br>Il maestro vedrà che sei <b>assente</b> a questa lezione.',
+          okLabel: 'Sì, sarò assente'
+        });
+        if(!ok) return;
+        if(nowDate() >= attendanceCutoff(nl.date, nl.hour)){ toast('Tempo scaduto: rivolgiti al maestro'); renderApp(); return; }
+      }
       try{
         await set(ref(db, cpath('courseAttendance/'+cid+'/'+nl.date+'/'+eid)), v);
         toast(v ? 'Di nuovo presente, grazie!' : 'Assenza segnalata');
