@@ -1877,7 +1877,7 @@ function loadCoursePaymentsForCourse(cid){
 
 function isTeacherOfCourse(cid){
   const c = state.courses[cid];
-  return !!(c && state.teachers[state.uid] && c.teacherUid === state.uid);
+  return !!(c && state.teachers[state.uid] && (c.teacherUid === state.uid || c.teacherUid2 === state.uid));
 }
 
 const enrollmentListenersLoaded = new Set();
@@ -2368,11 +2368,11 @@ function getBusyTeacherUidsAt(dateStr, hour){
     if(b.date===dateStr && b.hour===hour && b.mode==='lezione' && b.teacherUid) busy.add(b.teacherUid);
   });
   Object.values(state.courses||{}).forEach(c=>{
-    if(!c.teacherUid) return;
+    if(!c.teacherUid && !c.teacherUid2) return;
     if(dateStr < c.startDate || dateStr > c.endDate) return;
     const dow = new Date(dateStr+'T00:00:00').getDay();
     const hasSession = getCourseSessions(c).some(s=>s.weekday===dow && s.hour===hour);
-    if(hasSession) busy.add(c.teacherUid);
+    if(hasSession){ if(c.teacherUid) busy.add(c.teacherUid); if(c.teacherUid2) busy.add(c.teacherUid2); }
   });
   return busy;
 }
@@ -2486,8 +2486,8 @@ function renderCorsiScreen(host){
   const formOpen = state.isAdmin && (state.showCourseForm || !!state.editCourseId);
   const q = v => String(v==null?'':v).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
   const f = state.courseForm || (edCourse
-    ? { name:edCourse.name||'', livello:edCourse.livello||'Principianti', teacherUid:edCourse.teacherUid||'', startDate:edCourse.startDate||todayKey(), endDate:edCourse.endDate||'', maxSeats:edCourse.maxSeats||8, monthlyFee:edCourse.monthlyFee||0 }
-    : { name:'', livello:'Principianti', teacherUid:'', startDate:todayKey(), endDate:'', maxSeats:8, monthlyFee:40 });
+    ? { name:edCourse.name||'', livello:edCourse.livello||'Principianti', teacherUid:edCourse.teacherUid||'', teacherUid2:edCourse.teacherUid2||'', startDate:edCourse.startDate||todayKey(), endDate:edCourse.endDate||'', maxSeats:edCourse.maxSeats||8, monthlyFee:edCourse.monthlyFee||0 }
+    : { name:'', livello:'Principianti', teacherUid:'', teacherUid2:'', startDate:todayKey(), endDate:'', maxSeats:8, monthlyFee:40 });
   const LEVELS = ['Principianti','Base','Intermedio','Avanzato','Agonisti'];
 
   const screen = document.createElement('div');
@@ -2515,6 +2515,7 @@ function renderCorsiScreen(host){
         <select id="cLevel">${LEVELS.map(l=>`<option value="${l}" ${l===f.livello?'selected':''}>${l}</option>`).join('')}</select>
       </div>
       <div class="field"><label>Maestro</label><div id="teacherPickerHost"></div></div>
+      <div class="field"><label>Secondo maestro (facoltativo)</label><div id="teacher2PickerHost"></div></div>
       <div class="section-title" style="margin-top:6px;">Giorni della settimana</div>
       <div id="sessionRows"></div>
       <button class="btn-ghost" id="addSessionBtn" style="width:100%;margin-top:4px;">+ Aggiungi un altro giorno</button>
@@ -2544,7 +2545,7 @@ function renderCorsiScreen(host){
   function captureCourseForm(){
     if(!screen.querySelector('#cName')) return;
     const g = id => screen.querySelector(id).value;
-    state.courseForm = { name:g('#cName'), livello:g('#cLevel'), teacherUid:(state.pickers.teacher||{}).value||'', startDate:g('#cStart'), endDate:g('#cEnd'), maxSeats:g('#cMax'), monthlyFee:g('#cFee') };
+    state.courseForm = { name:g('#cName'), livello:g('#cLevel'), teacherUid:(state.pickers.teacher||{}).value||'', teacherUid2:(state.pickers.teacher2||{}).value||'', startDate:g('#cStart'), endDate:g('#cEnd'), maxSeats:g('#cMax'), monthlyFee:g('#cFee') };
   }
   const formCard = screen.querySelector('#courseFormCard');
   if(formCard){ formCard.addEventListener('input', captureCourseForm); formCard.addEventListener('change', captureCourseForm); }
@@ -2556,6 +2557,13 @@ function renderCorsiScreen(host){
         .map(([_,m])=>({ value:m.uid, label:m.name+(state.teachers[m.uid]?' (maestro)':'') }))
         .sort((a,b)=>a.label.localeCompare(b.label,'it'));
       tHost.appendChild(makePicker('teacher', tItems, { initial:f.teacherUid, placeholder:'Cerca socio per nome…', noneLabel:'— nessuno assegnato —', onChange:()=>captureCourseForm() }));
+    }
+    const t2Host = screen.querySelector('#teacher2PickerHost');
+    if(t2Host){
+      const t2Items = allLinkedMembers
+        .map(([_,m])=>({ value:m.uid, label:m.name+(state.teachers[m.uid]?' (maestro)':'') }))
+        .sort((a,b)=>a.label.localeCompare(b.label,'it'));
+      t2Host.appendChild(makePicker('teacher2', t2Items, { initial:f.teacherUid2, placeholder:'Cerca socio per nome…', noneLabel:'— nessun secondo maestro —', onChange:()=>captureCourseForm() }));
     }
     const rowsHost = screen.querySelector('#sessionRows');
     state.draftSessions.forEach((s,i)=>{
@@ -2670,7 +2678,7 @@ function renderCorsiScreen(host){
     card.innerHTML = `
       <div class="section-title">${c.name} ${(c.livello && (state.isAdmin||isMyCourse))?`<span class="pill" style="padding:2px 8px;">${c.livello}</span>`:''}</div>
       <div class="hint">${getCourseSessions(c).map(s=>`${WEEKDAY_FULL[s.weekday]} · ${String(s.hour).padStart(2,'0')}:00 · ${(state.club.courts.find(x=>x.id===s.courtId)||{}).name||''}`).join('<br>')}<br>
-      ${fmtDateDisplay(c.startDate)} → ${fmtDateDisplay(c.endDate)} · Maestro: ${c.teacherName||'—'}<br>
+      ${fmtDateDisplay(c.startDate)} → ${fmtDateDisplay(c.endDate)} · ${c.teacherUid2 ? 'Maestri' : 'Maestro'}: ${c.teacherName||'—'}${c.teacherUid2 ? ' · '+(c.teacherName2||'—') : ''}<br>
       Posti: ${c.enrolledCount||0}/${c.maxSeats} · Quota: € ${c.monthlyFee}/mese</div>
       ${nl ? `
       <div style="margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:8px;">
@@ -2751,7 +2759,7 @@ function renderCorsiScreen(host){
   cardsHost.querySelectorAll('[data-act="editcourse"]').forEach(btn=>{
     btn.onclick = () => {
       const cid = btn.dataset.cid;
-      state.editCourseId = cid; state.showCourseForm = true; state.courseForm = null; delete state.pickers.teacher;
+      state.editCourseId = cid; state.showCourseForm = true; state.courseForm = null; delete state.pickers.teacher; delete state.pickers.teacher2;
       state.draftSessions = getCourseSessions(state.courses[cid]).map(x=>({ weekday:x.weekday, hour:x.hour, courtId:x.courtId }));
       if(!state.draftSessions.length) state.draftSessions = [{ weekday: 1, hour: OPEN_HOUR, courtId: state.club.courts[0].id }];
       renderApp();
@@ -2974,9 +2982,9 @@ function renderCorsiScreen(host){
 
   if(state.isAdmin){
     const resetDraft = () => { state.draftSessions = [{ weekday: 1, hour: OPEN_HOUR, courtId: state.club.courts[0].id }]; };
-    const closeForm = () => { state.showCourseForm = false; state.editCourseId = null; state.courseForm = null; delete state.pickers.teacher; resetDraft(); };
+    const closeForm = () => { state.showCourseForm = false; state.editCourseId = null; state.courseForm = null; delete state.pickers.teacher; delete state.pickers.teacher2; resetDraft(); };
     const newBtn = screen.querySelector('#newCourseBtn');
-    if(newBtn) newBtn.onclick = () => { state.showCourseForm = true; state.editCourseId = null; state.courseForm = null; delete state.pickers.teacher; resetDraft(); renderApp(); };
+    if(newBtn) newBtn.onclick = () => { state.showCourseForm = true; state.editCourseId = null; state.courseForm = null; delete state.pickers.teacher; delete state.pickers.teacher2; resetDraft(); renderApp(); };
     const cancelBtn = screen.querySelector('#cancelCourseBtn');
     if(cancelBtn) cancelBtn.onclick = () => { closeForm(); renderApp(); };
     const createBtn = screen.querySelector('#createCourseBtn');
@@ -2985,6 +2993,10 @@ function renderCorsiScreen(host){
       const livello = screen.querySelector('#cLevel').value;
       const teacherUid = (state.pickers.teacher||{}).value || '';
       const teacherName = teacherUid ? (allLinkedMembers.find(([_,m])=>m.uid===teacherUid)||[])[1]?.name : '';
+      const teacherUid2 = (state.pickers.teacher2||{}).value || '';
+      const teacherName2 = teacherUid2 ? (allLinkedMembers.find(([_,m])=>m.uid===teacherUid2)||[])[1]?.name : '';
+      if(teacherUid2 && teacherUid2===teacherUid){ toast('Il secondo maestro deve essere diverso dal primo'); return; }
+      if(teacherUid2 && !teacherUid){ toast('Seleziona prima il maestro principale'); return; }
       const startDate = screen.querySelector('#cStart').value;
       const endDate = screen.querySelector('#cEnd').value;
       const maxSeats = parseInt(screen.querySelector('#cMax').value,10) || 8;
@@ -2997,18 +3009,21 @@ function renderCorsiScreen(host){
         if(teacherUid && !state.teachers[teacherUid]){
           await set(ref(db, cpath('teachers/'+teacherUid)), true);
         }
+        if(teacherUid2 && !state.teachers[teacherUid2]){
+          await set(ref(db, cpath('teachers/'+teacherUid2)), true);
+        }
         if(edCourse){
           const enrolled = edCourse.enrolledCount || 0;
           if(maxSeats < enrolled){ toast('I posti massimi non possono essere meno degli iscritti ('+enrolled+')'); return; }
           await update(ref(db, cpath('courses/'+state.editCourseId)), {
-            name, livello, teacherUid: teacherUid||null, teacherName: teacherName||'',
+            name, livello, teacherUid: teacherUid||null, teacherName: teacherName||'', teacherUid2: teacherUid2||null, teacherName2: teacherName2||'',
             sessions, startDate, endDate, maxSeats, monthlyFee
           });
           toast('Corso aggiornato');
         } else {
           const newRef = push(ref(db, cpath('courses')));
           await set(newRef, {
-            name, livello, teacherUid: teacherUid||null, teacherName: teacherName||'',
+            name, livello, teacherUid: teacherUid||null, teacherName: teacherName||'', teacherUid2: teacherUid2||null, teacherName2: teacherName2||'',
             sessions, startDate, endDate, maxSeats, monthlyFee,
             enrolledCount: 0, createdAt: Date.now()
           });
@@ -3041,7 +3056,7 @@ function renderMaestroScreen(host){
   if(!state.maestroWeekStart) state.maestroWeekStart = mondayOf(todayKey());
   const weekDays = Array.from({length:7}, (_,i)=>addDays(state.maestroWeekStart, i));
 
-  const myCourses = Object.entries(state.courses||{}).filter(([_,c])=>c.teacherUid===state.uid);
+  const myCourses = Object.entries(state.courses||{}).filter(([_,c])=>c.teacherUid===state.uid || c.teacherUid2===state.uid);
 
   myCourses.forEach(([cid])=>{ loadCourseEnrollments(cid); loadCourseAttendanceAll(cid); });
   Object.keys(state.courses||{}).forEach(id=>loadCourseRecoveries(id));
