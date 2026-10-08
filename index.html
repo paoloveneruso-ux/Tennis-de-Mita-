@@ -1183,9 +1183,9 @@ function getAttendanceCutoffHour(){ // configurabile dall'admin (info/attendance
   return (raw!=null && Number.isInteger(h) && h>=0 && h<=23) ? h : ATTENDANCE_CUTOFF_DEFAULT_HOUR;
 }
 function nowDate(){ return state.debugNow ? new Date(state.debugNow) : new Date(); }
-function nextLesson(course){
+function nextLesson(course, e){
   const now = nowDate();
-  const sessions = getCourseSessions(course);
+  const sessions = getCourseSessions(course).filter(x=>enrolleeAttendsSession(e, x.weekday, x.hour));
   for(let i=0;i<15;i++){
     const d = new Date(now.getFullYear(), now.getMonth(), now.getDate()+i);
     const key = dateKey(d);
@@ -1211,13 +1211,94 @@ function attGet(raw, hour){
   if(raw && typeof raw==='object'){ const v = raw['h'+hour]; return (v===true || v===false) ? v : undefined; }
   return undefined;
 }
+/* Ore assegnate per iscritto: courseEnrollments/{cid}/{eid}/sessions = { "1_17": true, "3_18": true } (chiave = giorno_ora).
+   Se manca, l'iscritto frequenta tutte le sessioni del corso. */
+function sessionKey(weekday, hour){ return weekday+'_'+hour; }
+function enrolleeSessionSet(e){ const m = e && e.sessions; return (m && typeof m==='object' && Object.keys(m).length) ? m : null; }
+function enrolleeAttendsSession(e, weekday, hour){ const m = enrolleeSessionSet(e); return !m || !!m[sessionKey(weekday,hour)]; }
+function enrolleeCourseHoursOn(course, e, date){
+  const dow = new Date(date+'T00:00:00').getDay();
+  return courseHoursOn(course, date).filter(h=>enrolleeAttendsSession(e, dow, h));
+}
+function getEnrollment(cid, eid){
+  const e = (state.courseEnrollments[cid]||{})[eid];
+  if(e) return e;
+  return (state.myEnrollments && state.myEnrollments[cid]===eid) ? state.myEnrollmentData[cid] : undefined;
+}
+function freeSeatsAt(c, weekday, hour){ // posti liberi in una certa sessione del corso
+  const cap = Number(c.maxSeats)||0;
+  const k = sessionKey(weekday, hour);
+  const taken = (c.seatsTaken && c.seatsTaken[k]!=null) ? Number(c.seatsTaken[k]) : (Number(c.enrolledCount)||0);
+  return Math.max(0, cap - taken);
+}
+function seatsTakenMap(cid){
+  const c = state.courses[cid] || {}, enr = Object.values(state.courseEnrollments[cid]||{});
+  const out = {};
+  getCourseSessions(c).forEach(x=>{ out[sessionKey(x.weekday,x.hour)] = enr.filter(e=>enrolleeAttendsSession(e,x.weekday,x.hour)).length; });
+  return out;
+}
+function syncSeatsTaken(cid){ // solo admin: tiene aggiornato courses/{cid}/seatsTaken, leggibile dai corsisti
+  if(!state.isAdmin) return;
+  const c = state.courses[cid]; if(!c || state.courseEnrollments[cid]===undefined) return;
+  const m = seatsTakenMap(cid), old = c.seatsTaken || {};
+  const same = Object.keys(m).length===Object.keys(old).length && Object.keys(m).every(k=>Number(old[k])===m[k]);
+  if(same) return;
+  update(ref(db, cpath('courses/'+cid)), { seatsTaken: m }).catch(e=>console.warn('seatsTaken', e));
+}
+function uniqueSessions(course){
+  const seen = new Set();
+  return getCourseSessions(course).slice().sort((a,b)=>a.weekday-b.weekday||a.hour-b.hour)
+    .filter(x=>{ const k=sessionKey(x.weekday,x.hour); if(seen.has(k)) return false; seen.add(k); return true; });
+}
+function sessionLabel(x){ return WEEKDAY_FULL[x.weekday].slice(0,3)+' '+String(x.hour).padStart(2,'0')+':00'; }
+function sessionsSummary(course, e){ // es. "Lun 17:00 · Gio 18:00" oppure '' se frequenta tutte
+  const m = enrolleeSessionSet(e); if(!m) return '';
+  return uniqueSessions(course).filter(x=>m[sessionKey(x.weekday,x.hour)]).map(sessionLabel).join(' · ');
+}
+/* Caselle per scegliere le ore frequentate. onChange riceve: null (tutte), oggetto {chiave:true} oppure 'none' (nessuna spunta) */
+function buildSessionPicker(course, current, onChange){
+  const sess = uniqueSessions(course);
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:8px;';
+  wrap.innerHTML = `<div class="hint" style="margin-bottom:6px;">Ore frequentate: spunta quelle assegnate</div>`;
+  const cbs = [];
+  const read = () => {
+    const picked = sess.filter((x,i)=>cbs[i].checked);
+    if(!picked.length) return 'none';
+    if(picked.length===sess.length) return null;
+    const m = {}; picked.forEach(x=>{ m[sessionKey(x.weekday,x.hour)] = true; });
+    return m;
+  };
+  sess.forEach(x=>{
+    const lab = document.createElement('label');
+    lab.style.cssText = 'display:flex;align-items:center;gap:10px;padding:5px 0;cursor:pointer;';
+    const cb = document.createElement('input'); cb.type='checkbox'; cb.style.cssText='width:auto;margin:0;';
+    cb.checked = !current || !!current[sessionKey(x.weekday,x.hour)];
+    cb.onchange = () => onChange(read());
+    cbs.push(cb);
+    const t = document.createElement('span'); t.textContent = sessionLabel(x);
+    lab.appendChild(cb); lab.appendChild(t); wrap.appendChild(lab);
+  });
+  wrap.getValue = read;
+  return wrap;
+}
+function sessionsFull(cid, keys, excludeEid){ // prima sessione già al completo tra quelle indicate (null = nessuna)
+  const c = state.courses[cid] || {}, enr = state.courseEnrollments[cid]||{};
+  const cap = Number(c.maxSeats)||0;
+  for(const x of uniqueSessions(c)){
+    if(keys && !keys[sessionKey(x.weekday,x.hour)]) continue;
+    const taken = Object.entries(enr).filter(([eid,e])=>eid!==excludeEid && enrolleeAttendsSession(e,x.weekday,x.hour)).length;
+    if(taken >= cap) return x;
+  }
+  return null;
+}
 function courseHoursOn(course, date){
   if(!course || date < course.startDate || date > course.endDate) return [];
   const dow = new Date(date+'T00:00:00').getDay();
   return getCourseSessions(course).filter(x=>x.weekday===dow).map(x=>x.hour).sort((a,b)=>a-b);
 }
-function attAbsentCount(course, date, raw){ // ore di assenza del corsista in quel giorno
-  if(raw===false) return courseHoursOn(course, date).length || 1;
+function attAbsentCount(course, date, raw, e){ // ore di assenza del corsista in quel giorno
+  if(raw===false) return (e ? enrolleeCourseHoursOn(course, e, date) : courseHoursOn(course, date)).length || 1;
   if(raw && typeof raw==='object') return Object.values(raw).filter(v=>v===false).length;
   return 0;
 }
@@ -1235,16 +1316,16 @@ async function writeAttendance(cid, date, eid, hour, val){
   }
 }
 
-function lessonsHeld(course){ // numero di ORE di lezione svolte finora
+function lessonsHeld(course, e){ // numero di ORE di lezione svolte finora (per l'iscritto e, se indicato)
   const today = todayKey();
   const end = course.endDate < today ? course.endDate : today;
   let n = 0, k = course.startDate, guard = 0;
-  while(k && k <= end && guard++ < 800){ n += courseHoursOn(course, k).length; k = addDays(k, 1); }
+  while(k && k <= end && guard++ < 800){ n += (e ? enrolleeCourseHoursOn(course, e, k) : courseHoursOn(course, k)).length; k = addDays(k, 1); }
   return n;
 }
-function countAbsences(course, hist, eid){ // ore di assenza fino a oggi
+function countAbsences(course, hist, eid, e){ // ore di assenza fino a oggi
   let a = 0;
-  Object.entries(hist||{}).forEach(([date, dm])=>{ if(dm && date<=todayKey()) a += attAbsentCount(course, date, dm[eid]); });
+  Object.entries(hist||{}).forEach(([date, dm])=>{ if(dm && date<=todayKey()) a += attAbsentCount(course, date, dm[eid], e); });
   return a;
 }
 const myAttListeners = new Set();
@@ -1315,7 +1396,7 @@ async function substituteBlocksReturn(cid, date, hour){
     const subs = Object.keys(subSnap.val()||{}).length;
     if(!subs) return false;
     const absent = Object.values(attSnap.val()||{}).filter(v=>attGet(v,hour)===false).length;
-    const free = Math.max(0, (Number(c.maxSeats)||0) - (Number(c.enrolledCount)||0));
+    const free = freeSeatsAt(c, new Date(date+'T00:00:00').getDay(), hour);
     return subs >= absent + free; // tornando, il numero di posti non basterebbe per tutti i sostituti
   }catch(e){ console.warn('substituteBlocksReturn', e); return false; }
 }
@@ -1336,7 +1417,7 @@ function myWeekLessons(monday){
       const date = addDays(monday, i);
       if(date < c.startDate || date > c.endDate) continue;
       const dow = new Date(date+'T00:00:00').getDay();
-      getCourseSessions(c).filter(x=>x.weekday===dow).forEach(x=>{
+      getCourseSessions(c).filter(x=>x.weekday===dow && enrolleeAttendsSession(state.myEnrollmentData[cid], x.weekday, x.hour)).forEach(x=>{
         out.push({ cid, eid, date, hour:x.hour, courtId:x.courtId, name:c.name });
       });
     }
@@ -1460,7 +1541,8 @@ function enrolleeBacklog(fromCid, eid){
   const hist = state.courseAttendanceByCourse[fromCid] || {};
   let absences = 0;
   const fromCourse = state.courses[fromCid];
-  Object.entries(hist).forEach(([date,dm])=>{ if(dm) absences += attAbsentCount(fromCourse, date, dm[eid]); });
+  const fromE = getEnrollment(fromCid, eid);
+  Object.entries(hist).forEach(([date,dm])=>{ if(dm) absences += attAbsentCount(fromCourse, date, dm[eid], fromE); });
   const recs = (state.courseRecoveries[fromCid] || {})[eid] || {};
   const recovered = Object.values(recs).filter(r=>r && r.status==='present').length;
   return { absences, recovered, owed: Math.max(0, absences-recovered) };
@@ -1479,8 +1561,14 @@ function lessonRecoveries(toCid, date){
 function lessonHoles(cid, date, hour){
   const c = state.courses[cid] || {};
   const day = (state.courseAttendanceByCourse[cid] || {})[date] || {};
-  const absent = Object.values(day).filter(v=> hour===undefined ? attAbsentCount(c,date,v)>0 : attGet(v,hour)===false).length;
-  const free = Math.max(0, (Number(c.maxSeats)||0) - (Number(c.enrolledCount)||0));
+  const enrs = state.courseEnrollments[cid];
+  const dow = new Date(date+'T00:00:00').getDay();
+  const absent = Object.entries(day).filter(([eid,v])=>{
+    const e = enrs ? enrs[eid] : undefined;
+    if(hour!==undefined && e && !enrolleeAttendsSession(e, dow, hour)) return false; // non è una sua ora
+    return hour===undefined ? attAbsentCount(c,date,v,e)>0 : attGet(v,hour)===false;
+  }).length;
+  const free = hour===undefined ? Math.max(0, (Number(c.maxSeats)||0) - (Number(c.enrolledCount)||0)) : freeSeatsAt(c, dow, hour);
   const taken = lessonRecoveries(cid, date).filter(x=>x.rec.status==='proposed' || x.rec.status==='present').length;
   return { absent, free, taken, holes: Math.max(0, absent + free - taken) };
 }
@@ -1615,7 +1703,7 @@ function buildRecoveryPanel(cid, date, hour){
 
   // presenze della lezione (il maestro può sempre segnare o cambiare)
   const attHost = panel.querySelector('#recoAtt');
-  const enr = Object.entries(state.courseEnrollments[cid]||{});
+  const enr = Object.entries(state.courseEnrollments[cid]||{}).filter(([_,e])=>enrolleeAttendsSession(e, dow, hour));
   const day = (state.courseAttendanceByCourse[cid]||{})[date] || {};
   if(!enr.length) attHost.innerHTML = `<div class="hint">Nessun corsista iscritto.</div>`;
   enr.forEach(([eid,e])=>{
@@ -1961,6 +2049,7 @@ function loadCourseEnrollments(cid){
   enrollmentListenersLoaded.add(cid);
   onValue(ref(db, cpath('courseEnrollments/'+cid)), s=>{
     state.courseEnrollments[cid] = s.val()||{};
+    syncSeatsTaken(cid);
     renderCurrent();
   }, err=>console.error('enrollments', err));
 }
@@ -2686,7 +2775,8 @@ function renderCorsiScreen(host){
     loadCourseAttendanceAll(cid); loadMyRecoveries(cid, myEid2);
     let statsHtml = '';
     if(state.courseAttendanceByCourse[cid] !== undefined && myEid2){
-      const presences = Math.max(0, lessonsHeld(c) - countAbsences(c, state.courseAttendanceByCourse[cid], myEid2));
+      const myE = state.myEnrollmentData[cid];
+      const presences = Math.max(0, lessonsHeld(c, myE) - countAbsences(c, state.courseAttendanceByCourse[cid], myEid2, myE));
       const bl = enrolleeBacklog(cid, myEid2);
       statsHtml = `<div class="list-row"><span>Presenze</span><span class="pill">${presences}</span></div>
         <div class="list-row" style="flex-wrap:wrap;gap:4px 8px;"><span>Assenze</span><span class="pill" style="${bl.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${bl.absences} · recuperate ${bl.recovered} · da recuperare ${bl.owed}</span></div>`;
@@ -2734,7 +2824,7 @@ function renderCorsiScreen(host){
     card.className = 'card';
     const isMyCourse = isTeacherOfCourse(cid);
     const myEid = state.myEnrollments ? state.myEnrollments[cid] : null;
-    const nl = myEid ? nextLesson(c) : null;
+    const nl = myEid ? nextLesson(c, state.myEnrollmentData[cid]) : null;
     if(nl) loadMyAttendance(cid, nl.date, myEid);
     const myStatus = nl ? attGet(state.myAttendance[cid+'|'+nl.date], nl.hour) : undefined;
     const canDeclare = !!nl && nowDate() < attendanceCutoff(nl.date, nl.hour);
@@ -2778,7 +2868,7 @@ function renderCorsiScreen(host){
       const cid = btn.dataset.cid;
       const eid = state.myEnrollments[cid];
       const c = state.courses[cid];
-      const nl = c ? nextLesson(c) : null;
+      const nl = c ? nextLesson(c, state.myEnrollmentData[cid]) : null;
       if(!eid || !nl) return;
       if(nowDate() >= attendanceCutoff(nl.date, nl.hour)){ toast('Tempo scaduto: rivolgiti al maestro'); renderApp(); return; }
       const v = btn.dataset.v === '1';
@@ -2881,6 +2971,7 @@ function renderCorsiScreen(host){
           <option value="monthly" ${draft.billing==='monthly'?'selected':''}>Mensile</option>
         </select>
       </div>
+      <div id="enrollSessHost-${cid}"></div>
       <button class="btn-ghost" id="addEnrollBtn-${cid}" style="width:100%;margin-top:6px;">Aggiungi corsista</button>
     `;
     detailHost.appendChild(box);
@@ -2894,6 +2985,10 @@ function renderCorsiScreen(host){
         box.querySelector('#newEnrollPhone-'+cid).value = draft.phone;
       }
     }));
+    if(uniqueSessions(course).length > 1){
+      box.querySelector('#enrollSessHost-'+cid).appendChild(buildSessionPicker(course, (draft.sessions && draft.sessions!=='none') ? draft.sessions : null, v=>{ draft.sessions = v; }));
+    }
+    syncSeatsTaken(cid);
     box.querySelector('#newEnrollName-'+cid).oninput = (e)=>{ draft.name = e.target.value; };
     box.querySelector('#newEnrollPhone-'+cid).oninput = (e)=>{ draft.phone = e.target.value; };
     box.querySelector('#newEnrollBilling-'+cid).onchange = (e)=>{ draft.billing = e.target.value; };
@@ -2910,12 +3005,30 @@ function renderCorsiScreen(host){
         const pill = payPill(r.s);
         const row = document.createElement('div'); row.className = 'pay-row';
         row.innerHTML = `<div class="pay-head"><div style="min-width:0;"><div class="pay-name">${esc(e.name)}${e.uid?' <span class="pill" style="padding:2px 7px;">collegato</span>':''}</div><div class="hint">${e.phone?esc(e.phone)+' · ':''}${e.billing==='monthly'?'pagamento mensile':'pagamento bimestrale'}</div></div><span class="pill" style="${pill.style}">${pill.label}</span></div>`;
+        { const sum = sessionsSummary(course, e); const h = row.querySelector('.hint'); if(sum && h) h.insertAdjacentHTML('beforeend', '<br>Ore: '+esc(sum)); }
         row.querySelector('.pay-head').onclick = () => {
           if(state.payExpanded[r.key]) delete state.payExpanded[r.key]; else state.payExpanded[r.key] = true;
           paintEnrollList(state.enrollSearchText[cid]||'');
         };
         if(state.payExpanded[r.key]){
           const det = buildPayDetail(r, ()=>paintEnrollList(state.enrollSearchText[cid]||''));
+          if(uniqueSessions(course).length > 1){
+            let pending = enrolleeSessionSet(e);
+            const picker = buildSessionPicker(course, pending, v=>{ pending = v; });
+            const save = document.createElement('button');
+            save.className = 'btn-ghost'; save.style.cssText = 'width:100%;margin-top:8px;padding:9px;font-size:12px;'; save.textContent = 'Salva ore';
+            save.onclick = async () => {
+              const val = picker.getValue();
+              if(val==='none') return toast('Seleziona almeno un\'ora');
+              const full = sessionsFull(cid, val, eid);
+              if(full) return toast('Ora al completo: '+sessionLabel(full));
+              try{
+                await update(ref(db, cpath('courseEnrollments/'+cid+'/'+eid)), { sessions: val });
+                toast(val ? 'Ore salvate' : 'Frequenta tutte le ore');
+              }catch(err){ toast('Errore: '+err.message); }
+            };
+            det.appendChild(picker); det.appendChild(save);
+          }
           const del = document.createElement('button');
           del.className = 'small-btn'; del.style.marginTop = '10px'; del.textContent = 'Rimuovi corsista';
           del.onclick = async () => {
@@ -2944,12 +3057,15 @@ function renderCorsiScreen(host){
       const phone = (draft.phone||'').trim();
       if(!name) return toast('Inserisci il nome o collega un socio');
       const courseNow = state.courses[cid];
-      if((courseNow.enrolledCount||0) >= courseNow.maxSeats){ toast('Corso al completo'); return; }
+      if(draft.sessions==='none'){ toast('Seleziona almeno un\'ora'); return; }
+      const fullSess = sessionsFull(cid, (draft.sessions && draft.sessions!=='none') ? draft.sessions : null, null);
+      if(fullSess){ toast(uniqueSessions(courseNow).length>1 ? 'Ora al completo: '+sessionLabel(fullSess) : 'Corso al completo'); return; }
       try{
         const newRef = push(ref(db, cpath('courseEnrollments/'+cid)));
         const eid = newRef.key;
         const payload = { name, phone, uid: linkedUid, createdAt: Date.now() };
         if(draft.billing==='monthly') payload.billing = 'monthly';
+        if(draft.sessions && draft.sessions!=='none') payload.sessions = draft.sessions;
         await set(newRef, payload);
         if(linkedUid) await set(ref(db, cpath('myEnrollments/'+linkedUid+'/'+cid)), eid);
         await update(ref(db, cpath('courses/'+cid)), { enrolledCount: (courseNow.enrolledCount||0)+1 });
@@ -2988,14 +3104,18 @@ function renderCorsiScreen(host){
         if(!attHours.length) attHours = getCourseSessions(c).slice(0,1).map(x=>x.hour);
         if(!attHours.length) attHours = [0];
         if(!enrollments.length){ attListHost.innerHTML = `<div class="hint">Nessun corsista iscritto.</div>`; }
+        const realHours = courseHoursOn(c, state.attendanceDate).length > 0;
+        const attDow = new Date(state.attendanceDate+'T00:00:00').getDay();
         enrollments.forEach(([eid,e])=>{
+          const myHours = realHours ? attHours.filter(h=>enrolleeAttendsSession(e, attDow, h)) : attHours;
+          if(!myHours.length) return; // non ha ore in questo giorno
           const row = document.createElement('div'); row.className='list-row';
           row.innerHTML = `<span>${esc(e.name)}</span>`;
-          if(attHours.length===1){
-            row.appendChild(attendanceButtons(cid, state.attendanceDate, eid, att[eid], attHours[0]));
+          if(myHours.length===1){
+            row.appendChild(attendanceButtons(cid, state.attendanceDate, eid, att[eid], myHours[0]));
           } else {
             row.style.flexWrap = 'wrap';
-            attHours.forEach(h=>{
+            myHours.forEach(h=>{
               const sub = document.createElement('div');
               sub.style.cssText = 'display:flex;align-items:center;gap:8px;width:100%;justify-content:space-between;padding-top:4px;';
               sub.innerHTML = `<span class="hint">${String(h).padStart(2,'0')}:00</span>`;
@@ -3032,7 +3152,7 @@ function renderCorsiScreen(host){
         const history = state.courseAttendanceByCourse[cid] || {};
         loadCourseRecoveries(cid);
         const stats = enrollments.map(([eid,e])=>{
-          const presences = Math.max(0, lessonsHeld(course) - countAbsences(course, history, eid));
+          const presences = Math.max(0, lessonsHeld(course, e) - countAbsences(course, history, eid, e));
           const bl = enrolleeBacklog(cid, eid);
           return { eid, e, absences: bl.absences, recovered: bl.recovered, owed: bl.owed, presences };
         }).sort((a,b)=>b.owed-a.owed || b.absences-a.absences);
@@ -3147,7 +3267,7 @@ function renderMaestroScreen(host){
       if(dateStr < c.startDate || dateStr > c.endDate) return;
       getCourseSessions(c).filter(s=>s.weekday===dow).forEach(s=>{
         const court = (state.club.courts||[]).find(x=>x.id===s.courtId);
-        sessions.push({ cid, dateStr, hour: s.hour, courtName: court?court.name:'', courseName: c.name, enrolled: c.enrolledCount||0 });
+        sessions.push({ cid, dateStr, hour: s.hour, courtName: court?court.name:'', courseName: c.name, enrolled: (c.seatsTaken && c.seatsTaken[sessionKey(s.weekday,s.hour)]!=null) ? c.seatsTaken[sessionKey(s.weekday,s.hour)] : (c.enrolledCount||0) });
       });
     });
     sessions.sort((a,b)=>a.hour-b.hour);
@@ -3208,7 +3328,7 @@ function renderMaestroScreen(host){
       row.innerHTML = `<span>${String(s.hour).padStart(2,'0')}:00 · ${s.courtName} · ${s.courseName} <span class="pill" style="padding:2px 7px;">corso</span></span><span class="pill">${s.enrolled} iscritti</span>`;
       sessionsHost.appendChild(row);
       {
-        const enr = Object.entries(state.courseEnrollments[s.cid]||{});
+        const enr = Object.entries(state.courseEnrollments[s.cid]||{}).filter(([_,e])=>enrolleeAttendsSession(e, dow, s.hour));
         const dayAtt = (state.courseAttendanceByCourse[s.cid]||{})[d.dateStr] || {};
         const names = (test)=>enr.filter(([eid])=>test(attGet(dayAtt[eid], s.hour))).map(([_,e])=>esc(e.name||'—')).join(', ');
         const pres = enr.filter(([eid])=>attGet(dayAtt[eid], s.hour)===true).length;
