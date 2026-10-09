@@ -3504,9 +3504,8 @@ function renderMaestroScreen(host){
     const enr = Object.entries(state.courseEnrollments[s.cid]||{}).filter(([_,e])=>enrolleeAttendsSession(e, dow, s.hour, s.courtId));
     const dayAtt = (state.courseAttendanceByCourse[s.cid]||{})[s.dateStr] || {};
     const names = (test)=>enr.filter(([eid])=>test(attGet(dayAtt[eid], s.hour))).map(([_,e])=>esc(e.name||'—')).join(', ');
-    const pres = enr.filter(([eid])=>attGet(dayAtt[eid], s.hour)===true).length;
     const abs = enr.filter(([eid])=>attGet(dayAtt[eid], s.hour)===false).length;
-    const none = enr.length - pres - abs;
+    const pres = enr.length - abs; // chi non ha segnato l'assenza è presente di default
     const guests = lessonRecoveries(s.cid, s.dateStr, s.hour, s.courtId);
     const hl = lessonHoles(s.cid, s.dateStr, s.hour, s.courtId);
 
@@ -3514,7 +3513,6 @@ function renderMaestroScreen(host){
     if(!enr.length) chips.push(`<span class="mt-chip">nessun iscritto</span>`);
     if(pres) chips.push(`<span class="mt-chip ok">${pres} ${pres===1?'presente':'presenti'}</span>`);
     if(abs) chips.push(`<span class="mt-chip no">${abs} ${abs===1?'assente':'assenti'}</span>`);
-    if(none>0 && enr.length) chips.push(`<span class="mt-chip">${none} senza risposta</span>`);
     if(guests.length) chips.push(`<span class="mt-chip">${guests.length} ${guests.length===1?'recupero':'recuperi'}</span>`);
     if(hl.holes>0) chips.push(`<span class="mt-chip hole">${hl.holes} ${hl.holes===1?'posto da riempire':'posti da riempire'}</span>`);
 
@@ -3532,9 +3530,8 @@ function renderMaestroScreen(host){
     if(isOpen){
       const det = document.createElement('div'); det.className = 'mt-detail';
       const lines = [];
-      if(pres) lines.push(`<div><span class="pill" style="color:var(--ball);border-color:var(--ball);">Presenti (${pres})</span>${names(v=>v===true)}</div>`);
+      if(pres) lines.push(`<div><span class="pill" style="color:var(--ball);border-color:var(--ball);">Presenti (${pres})</span>${names(v=>v!==false)}</div>`);
       if(abs) lines.push(`<div><span class="pill" style="color:var(--danger);border-color:var(--danger);">Assenti (${abs})</span>${names(v=>v===false)}</div>`);
-      if(none>0 && enr.length) lines.push(`<div><span class="pill">Senza risposta (${none})</span>${names(v=>v===undefined)}</div>`);
       if(guests.length) lines.push(`<div><span class="pill">Recuperi (${guests.length})</span>${guests.map(g=>esc(g.rec.name||'—')+' ('+(g.rec.status==='present'?'presente':(g.rec.status==='absent'?'assente':'proposto'))+')').join(', ')}</div>`);
       if(lines.length){
         const blk = document.createElement('div'); blk.className = 'cal-att'; blk.innerHTML = lines.join('');
