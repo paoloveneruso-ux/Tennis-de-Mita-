@@ -92,6 +92,38 @@
   .wk-badge{font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.05em;border-radius:20px;padding:4px 10px;border:1px solid var(--ball-dim);color:var(--ball);white-space:nowrap;}
   .wk-badge.abs{border-color:var(--danger);color:var(--danger);}
   .wk-btn{padding:9px 14px;font-size:13px;border-radius:8px;white-space:nowrap;}
+  /* vista maestro: striscia dei giorni e sessioni compatte */
+  .mt-sum{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:13px;color:var(--ink-dim);margin-bottom:4px;}
+  .mt-sum b{color:var(--chalk);font-weight:600;}
+  .mt-today{background:var(--board);border:1px solid var(--line);color:var(--ball);padding:7px 14px;font-size:12px;border-radius:20px;flex-shrink:0;}
+  .mt-strip{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px;margin-top:10px;}
+  .mt-day{display:flex;flex-direction:column;align-items:center;gap:1px;padding:8px 0 7px;border-radius:10px;background:var(--board);border:1px solid var(--line);color:var(--ink-dim);}
+  .mt-day .dw{font-family:var(--font-mono);font-size:10px;text-transform:uppercase;letter-spacing:.06em;}
+  .mt-day .dn{font-family:var(--font-display);font-size:20px;line-height:1.15;color:var(--chalk);}
+  .mt-day .cnt{font-family:var(--font-mono);font-size:10px;min-height:13px;color:var(--ball);}
+  .mt-day.empty{opacity:.5;}
+  .mt-day.today:not(.sel){border-color:var(--ball-dim);}
+  .mt-day.sel{background:var(--ball);border-color:var(--ball);opacity:1;}
+  .mt-day.sel .dw,.mt-day.sel .dn,.mt-day.sel .cnt{color:#122019;}
+  .mt-dayhead{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:10px;}
+  .mt-daytitle{font-family:var(--font-display);font-size:20px;letter-spacing:.02em;color:var(--chalk);}
+  .mt-empty{text-align:center;color:var(--ink-dim);font-size:13px;padding:18px 0 8px;}
+  .mt-item{border:1px solid var(--line);border-radius:10px;background:var(--board-2);margin-bottom:8px;overflow:hidden;}
+  .mt-item.open{border-color:var(--ball-dim);}
+  .mt-head{display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;}
+  .mt-item.static .mt-head{cursor:default;}
+  .mt-time{font-family:var(--font-display);font-size:21px;letter-spacing:.02em;color:var(--chalk);flex:0 0 auto;}
+  .mt-meta{flex:1;min-width:0;}
+  .mt-name{font-weight:600;font-size:14px;color:var(--chalk);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .mt-sub{font-size:12px;color:var(--ink-dim);margin-top:1px;}
+  .mt-chev{color:var(--ink-dim);font-size:18px;line-height:1;flex:0 0 auto;transition:transform .15s;}
+  .mt-item.open .mt-chev{transform:rotate(90deg);}
+  .mt-chips{display:flex;flex-wrap:wrap;gap:6px;padding:0 12px 10px;}
+  .mt-chip{font-family:var(--font-mono);font-size:11px;border-radius:20px;padding:3px 9px;border:1px solid var(--line);color:var(--ink-dim);white-space:nowrap;}
+  .mt-chip.ok{color:var(--ball);border-color:var(--ball-dim);}
+  .mt-chip.no{color:var(--danger);border-color:var(--danger);}
+  .mt-chip.hole{color:var(--chalk);background:var(--clay);border-color:var(--clay);}
+  .mt-detail{border-top:1px solid var(--line);padding:10px 12px 12px;}
   .slot .mode-tag{display:block;font-size:8.5px;margin-top:1px;letter-spacing:.04em;text-transform:uppercase;opacity:.75;}
   .today-tally{display:flex;justify-content:space-between;align-items:center;background:var(--board);border:1px solid var(--line);border-radius:8px;padding:12px 14px;}
   .today-tally .num{font-family:var(--font-mono);font-size:22px;color:var(--ball);}
@@ -589,6 +621,8 @@ const state = {
   selectedTeacherUid: '',
   myTeachingBookings: {},
   maestroWeekStart: null,
+  maestroDay: null,
+  maestroOpenKey: null,
   auditLog: {},
   auditFilterAdmin: '',
   auditFrom: '',
@@ -3375,93 +3409,153 @@ function renderMaestroScreen(host){
     return { dateStr, lessons, sessions, hours, revenue };
   });
 
+  // giorno selezionato (di default oggi, se è nella settimana mostrata)
+  if(!state.maestroDay || !weekDays.includes(state.maestroDay)){
+    state.maestroDay = weekDays.includes(todayKey()) ? todayKey() : weekDays[0];
+  }
+  const selDay = state.maestroDay;
+  const MON = ['gen','feb','mar','apr','mag','giu','lug','ago','set','ott','nov','dic'];
+  const pt = d => { const [,m,dd] = d.split('-').map(Number); return { d:dd, m:m-1 }; };
+  const pa = pt(weekDays[0]), pb = pt(weekDays[6]);
+  const rangeTxt = pa.m===pb.m ? `${pa.d} – ${pb.d} ${MON[pb.m]}` : `${pa.d} ${MON[pa.m]} – ${pb.d} ${MON[pb.m]}`;
+
   const screen = document.createElement('div');
   screen.className = 'screen';
   screen.innerHTML = `
     <div class="card">
-      <div class="section-title">Settimana</div>
-      <div class="btn-row">
-        <button class="btn-ghost" id="prevWeek">◀ Prec.</button>
-        <button class="btn-ghost" id="thisWeek">Oggi</button>
-        <button class="btn-ghost" id="nextWeek">Succ. ▶</button>
+      <div class="wk-head">
+        <div>
+          <div class="wk-title">Il tuo calendario</div>
+          <div class="wk-sub">${weekDays.includes(todayKey()) ? 'Questa settimana' : 'Settimana'} · ${rangeTxt}</div>
+        </div>
+        <div class="wk-nav">
+          <button id="prevWeek" aria-label="Settimana precedente">‹</button>
+          <button id="nextWeek" aria-label="Settimana successiva">›</button>
+        </div>
       </div>
-      <div class="hint" style="margin-top:8px;text-align:center;">${fmtDateDisplay(weekDays[0])} → ${fmtDateDisplay(weekDays[6])}</div>
-      <div class="totale-box"><span class="l">Ore lezioni nella settimana</span><span class="v">${weekHours}h</span></div>
-      <div class="totale-box"><span class="l">Incasso stimato</span><span class="v">€ ${weekRevenue.toFixed(2)}</span></div>
+      <div class="mt-sum"><span>Settimana: <b>${weekHours}h</b> di lezioni · <b>€ ${weekRevenue.toFixed(2)}</b></span><button class="mt-today" id="thisWeek">Oggi</button></div>
+      <div class="mt-strip" id="dayStrip"></div>
     </div>
-    <div id="daysHost"></div>
+    <div class="card" id="dayCard"></div>
     <div class="hint">Le quote dei corsi sono mensili e vengono gestite dall'admin nella tab Corsi — qui vedi solo gli orari.</div>
-
   `;
   host.replaceChildren(screen);
 
-  screen.querySelector('#prevWeek').onclick = () => { state.maestroWeekStart = addDays(state.maestroWeekStart, -7); renderApp(); };
-  screen.querySelector('#nextWeek').onclick = () => { state.maestroWeekStart = addDays(state.maestroWeekStart, 7); renderApp(); };
-  screen.querySelector('#thisWeek').onclick = () => { state.maestroWeekStart = mondayOf(todayKey()); renderApp(); };
+  const resetOpen = () => { state.maestroOpenKey = null; state.recoverySession = null; };
+  screen.querySelector('#prevWeek').onclick = () => { state.maestroWeekStart = addDays(state.maestroWeekStart, -7); state.maestroDay = addDays(selDay, -7); resetOpen(); renderApp(); };
+  screen.querySelector('#nextWeek').onclick = () => { state.maestroWeekStart = addDays(state.maestroWeekStart, 7); state.maestroDay = addDays(selDay, 7); resetOpen(); renderApp(); };
+  screen.querySelector('#thisWeek').onclick = () => { state.maestroWeekStart = mondayOf(todayKey()); state.maestroDay = todayKey(); resetOpen(); renderApp(); };
 
-  const daysHost = screen.querySelector('#daysHost');
-  dayData.forEach(d=>{
-    const dow = new Date(d.dateStr+'T00:00:00').getDay();
-    const isToday = d.dateStr===todayKey();
+  // striscia dei giorni
+  const strip = screen.querySelector('#dayStrip');
+  dayData.forEach(dd=>{
+    const dow = new Date(dd.dateStr+'T00:00:00').getDay();
+    const n = dd.lessons.length + dd.sessions.length;
+    const b = document.createElement('button');
+    b.className = 'mt-day' + (dd.dateStr===selDay?' sel':'') + (dd.dateStr===todayKey()?' today':'') + (n?'':' empty');
+    b.innerHTML = `<span class="dw">${WEEKDAY_FULL[dow].slice(0,3)}</span><span class="dn">${pt(dd.dateStr).d}</span><span class="cnt">${n||''}</span>`;
+    b.onclick = () => { state.maestroDay = dd.dateStr; resetOpen(); renderApp(); };
+    strip.appendChild(b);
+  });
+
+  // giornata selezionata
+  const d = dayData.find(x=>x.dateStr===selDay);
+  const dow = new Date(selDay+'T00:00:00').getDay();
+  const dayCard = screen.querySelector('#dayCard');
+  const total = d.lessons.length + d.sessions.length;
+  dayCard.innerHTML = `
+    <div class="mt-dayhead">
+      <div class="mt-daytitle">${WEEKDAY_FULL[dow]} ${pt(selDay).d} ${IT_MONTHS[pt(selDay).m]}${selDay===todayKey()?' · oggi':''}</div>
+      <div class="hint">${total ? total+(total===1?' impegno':' impegni') : ''}</div>
+    </div>
+    <div id="mtItems"></div>
+    ${d.hours ? `<div class="list-row"><span>Lezioni private</span><span class="pill">${d.hours}h · € ${d.revenue.toFixed(2)}</span></div>` : ''}`;
+  const itemsHost = dayCard.querySelector('#mtItems');
+  if(!total){ itemsHost.innerHTML = `<div class="mt-empty">Niente in programma</div>`; return; }
+
+  const items = [
+    ...d.lessons.map(([bid,l])=>({ type:'lesson', hour:l.hour, l })),
+    ...d.sessions.map(s=>({ type:'session', hour:s.hour, s }))
+  ].sort((x,y)=> x.hour-y.hour || (x.type==='lesson'?-1:1));
+  const pad = h => String(h).padStart(2,'0')+':00';
+
+  items.forEach(it=>{
     const card = document.createElement('div');
-    card.className = 'card';
-    if(isToday) card.style.borderColor = 'var(--ball-dim)';
-    card.innerHTML = `
-      <div class="section-title">${WEEKDAY_FULL[dow]} ${fmtDateDisplay(d.dateStr)}${isToday?' · oggi':''}</div>
-      ${(!d.lessons.length && !d.sessions.length) ? '<div class="hint">Niente in programma.</div>' : ''}
-      <div id="lessons-${d.dateStr}"></div>
-      <div id="sessions-${d.dateStr}"></div>
-      ${d.hours ? `<div class="list-row"><span>Totale giornata</span><span class="pill">${d.hours}h · € ${d.revenue.toFixed(2)}</span></div>` : ''}
-    `;
-    daysHost.appendChild(card);
-    const lessonsHost = card.querySelector('#lessons-'+d.dateStr);
-    d.lessons.forEach(([bid,l])=>{
-      const row = document.createElement('div'); row.className='list-row';
-      row.innerHTML = `<span>${String(l.hour).padStart(2,'0')}:00 · ${l.courtName||''} · ${l.clientName} <span class="pill" style="padding:2px 7px;">lezione</span></span><span class="pill">€ ${(l.rate||0).toFixed(2)}</span>`;
-      lessonsHost.appendChild(row);
-    });
-    const sessionsHost = card.querySelector('#sessions-'+d.dateStr);
-    d.sessions.forEach(s=>{
-      const row = document.createElement('div'); row.className='list-row';
-      row.innerHTML = `<span>${String(s.hour).padStart(2,'0')}:00 · ${s.courtName} · ${s.courseName} <span class="pill" style="padding:2px 7px;">corso</span></span><span class="pill">${s.enrolled} iscritti</span>`;
-      sessionsHost.appendChild(row);
-      {
-        const enr = Object.entries(state.courseEnrollments[s.cid]||{}).filter(([_,e])=>enrolleeAttendsSession(e, dow, s.hour, s.courtId));
-        const dayAtt = (state.courseAttendanceByCourse[s.cid]||{})[d.dateStr] || {};
-        const names = (test)=>enr.filter(([eid])=>test(attGet(dayAtt[eid], s.hour))).map(([_,e])=>esc(e.name||'—')).join(', ');
-        const pres = enr.filter(([eid])=>attGet(dayAtt[eid], s.hour)===true).length;
-        const abs = enr.filter(([eid])=>attGet(dayAtt[eid], s.hour)===false).length;
-        const none = enr.length - pres - abs;
-        const guests = lessonRecoveries(s.cid, d.dateStr, s.hour, s.courtId);
-        const lines = [];
-        if(pres) lines.push(`<div><span class="pill" style="color:var(--ball);border-color:var(--ball);">Presenti (${pres})</span>${names(v=>v===true)}</div>`);
-        if(abs) lines.push(`<div><span class="pill" style="color:var(--danger);border-color:var(--danger);">Assenti (${abs})</span>${names(v=>v===false)}</div>`);
-        if(none>0 && enr.length) lines.push(`<div><span class="pill">Senza risposta (${none})</span>${names(v=>v===undefined)}</div>`);
-        if(guests.length) lines.push(`<div><span class="pill">Recuperi (${guests.length})</span>${guests.map(g=>esc(g.rec.name||'—')+' ('+(g.rec.status==='present'?'presente':(g.rec.status==='absent'?'assente':'proposto'))+')').join(', ')}</div>`);
-        if(lines.length){
-          const blk = document.createElement('div'); blk.className = 'cal-att'; blk.innerHTML = lines.join('');
-          sessionsHost.appendChild(blk);
-        }
+    if(it.type==='lesson'){
+      const l = it.l;
+      card.className = 'mt-item static';
+      card.innerHTML = `<div class="mt-head"><div class="mt-time">${pad(l.hour)}</div>
+        <div class="mt-meta"><div class="mt-name">${esc(l.clientName||'—')}</div><div class="mt-sub">Lezione privata${l.courtName?' · '+esc(l.courtName):''}</div></div>
+        <span class="pill">€ ${(l.rate||0).toFixed(2)}</span></div>`;
+      itemsHost.appendChild(card);
+      return;
+    }
+    const s = it.s;
+    const key = [s.cid, s.dateStr, s.hour, s.courtId||''].join('|');
+    const rs = state.recoverySession;
+    const recoOpen = !!rs && rs.cid===s.cid && rs.date===s.dateStr && rs.hour===s.hour && (rs.courtId||'')===(s.courtId||'');
+    const isOpen = recoOpen || state.maestroOpenKey===key;
+
+    const enr = Object.entries(state.courseEnrollments[s.cid]||{}).filter(([_,e])=>enrolleeAttendsSession(e, dow, s.hour, s.courtId));
+    const dayAtt = (state.courseAttendanceByCourse[s.cid]||{})[s.dateStr] || {};
+    const names = (test)=>enr.filter(([eid])=>test(attGet(dayAtt[eid], s.hour))).map(([_,e])=>esc(e.name||'—')).join(', ');
+    const pres = enr.filter(([eid])=>attGet(dayAtt[eid], s.hour)===true).length;
+    const abs = enr.filter(([eid])=>attGet(dayAtt[eid], s.hour)===false).length;
+    const none = enr.length - pres - abs;
+    const guests = lessonRecoveries(s.cid, s.dateStr, s.hour, s.courtId);
+    const hl = lessonHoles(s.cid, s.dateStr, s.hour, s.courtId);
+
+    const chips = [];
+    if(!enr.length) chips.push(`<span class="mt-chip">nessun iscritto</span>`);
+    if(pres) chips.push(`<span class="mt-chip ok">${pres} ${pres===1?'presente':'presenti'}</span>`);
+    if(abs) chips.push(`<span class="mt-chip no">${abs} ${abs===1?'assente':'assenti'}</span>`);
+    if(none>0 && enr.length) chips.push(`<span class="mt-chip">${none} senza risposta</span>`);
+    if(guests.length) chips.push(`<span class="mt-chip">${guests.length} ${guests.length===1?'recupero':'recuperi'}</span>`);
+    if(hl.holes>0) chips.push(`<span class="mt-chip hole">${hl.holes} ${hl.holes===1?'posto da riempire':'posti da riempire'}</span>`);
+
+    card.className = 'mt-item' + (isOpen ? ' open' : '');
+    card.innerHTML = `<div class="mt-head"><div class="mt-time">${pad(s.hour)}</div>
+      <div class="mt-meta"><div class="mt-name">${esc(s.courseName)}</div><div class="mt-sub">Corso${s.courtName?' · '+esc(s.courtName):''} · ${s.enrolled} iscritti</div></div>
+      <span class="mt-chev">›</span></div>
+      <div class="mt-chips">${chips.join('')}</div>`;
+    card.querySelector('.mt-head').onclick = () => {
+      if(isOpen){ state.maestroOpenKey = null; if(recoOpen) state.recoverySession = null; }
+      else { state.maestroOpenKey = key; state.recoverySession = null; }
+      renderApp();
+    };
+
+    if(isOpen){
+      const det = document.createElement('div'); det.className = 'mt-detail';
+      const lines = [];
+      if(pres) lines.push(`<div><span class="pill" style="color:var(--ball);border-color:var(--ball);">Presenti (${pres})</span>${names(v=>v===true)}</div>`);
+      if(abs) lines.push(`<div><span class="pill" style="color:var(--danger);border-color:var(--danger);">Assenti (${abs})</span>${names(v=>v===false)}</div>`);
+      if(none>0 && enr.length) lines.push(`<div><span class="pill">Senza risposta (${none})</span>${names(v=>v===undefined)}</div>`);
+      if(guests.length) lines.push(`<div><span class="pill">Recuperi (${guests.length})</span>${guests.map(g=>esc(g.rec.name||'—')+' ('+(g.rec.status==='present'?'presente':(g.rec.status==='absent'?'assente':'proposto'))+')').join(', ')}</div>`);
+      if(lines.length){
+        const blk = document.createElement('div'); blk.className = 'cal-att'; blk.innerHTML = lines.join('');
+        det.appendChild(blk);
+      } else {
+        det.innerHTML = `<div class="hint">Nessuna presenza registrata per ora.</div>`;
       }
-      const hl = lessonHoles(s.cid, d.dateStr, s.hour, s.courtId);
-      const rs = state.recoverySession;
-      const isOpen = !!rs && rs.cid===s.cid && rs.date===d.dateStr && rs.hour===s.hour && (rs.courtId||'')===(s.courtId||'');
       const tog = document.createElement('button');
       tog.className = 'btn-ghost';
-      tog.style.cssText = 'width:100%;margin:6px 0 10px;padding:9px;font-size:12px;';
-      tog.textContent = (isOpen ? 'Chiudi presenze e recuperi' : 'Presenze e recuperi') + (hl.holes>0 ? ' · '+hl.holes+(hl.holes===1?' posto da riempire':' posti da riempire') : '');
+      tog.style.cssText = 'width:100%;margin-top:6px;padding:9px;font-size:12px;';
+      tog.textContent = recoOpen ? 'Chiudi presenze e recuperi' : 'Presenze e recuperi';
       tog.onclick = () => {
-        state.recoverySession = isOpen ? null : { cid:s.cid, date:d.dateStr, hour:s.hour, courtId:s.courtId };
+        state.recoverySession = recoOpen ? null : { cid:s.cid, date:s.dateStr, hour:s.hour, courtId:s.courtId };
+        state.maestroOpenKey = key;
         state.recoLimit = 15; state.recoScroll = 0; state.recoSearch = ''; state.recoAll = false;
         renderApp();
       };
-      sessionsHost.appendChild(tog);
-      if(isOpen){
-        const panel = buildRecoveryPanel(s.cid, d.dateStr, s.hour, s.courtId);
-        sessionsHost.appendChild(panel);
+      det.appendChild(tog);
+      if(recoOpen){
+        const panel = buildRecoveryPanel(s.cid, s.dateStr, s.hour, s.courtId);
+        det.appendChild(panel);
         if(panel._restore) panel._restore();
       }
-    });
+      card.appendChild(det);
+    }
+    itemsHost.appendChild(card);
   });
 }
 
