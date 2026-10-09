@@ -1216,7 +1216,7 @@ function getAttendanceCutoffHour(){ // configurabile dall'admin (info/attendance
 function nowDate(){ return state.debugNow ? new Date(state.debugNow) : new Date(); }
 function nextLesson(course, e){
   const now = nowDate();
-  const sessions = getCourseSessions(course).filter(x=>enrolleeAttendsSession(e, x.weekday, x.hour));
+  const sessions = getCourseSessions(course).filter(x=>enrolleeAttendsSession(e, x.weekday, x.hour, x.courtId));
   for(let i=0;i<15;i++){
     const d = new Date(now.getFullYear(), now.getMonth(), now.getDate()+i);
     const key = dateKey(d);
@@ -1244,28 +1244,51 @@ function attGet(raw, hour){
 }
 /* Ore assegnate per iscritto: courseEnrollments/{cid}/{eid}/sessions = { "1_17": true, "3_18": true } (chiave = giorno_ora).
    Se manca, l'iscritto frequenta tutte le sessioni del corso. */
-function sessionKey(weekday, hour){ return weekday+'_'+hour; }
+function sessionKey(weekday, hour, courtId){ // giorno_ora_campo (il formato vecchio giorno_ora vale per qualsiasi campo)
+  return courtId!=null && courtId!=='' ? weekday+'_'+hour+'_'+String(courtId).replace(/[.$#\[\]\/]/g,'-') : weekday+'_'+hour;
+}
 function enrolleeSessionSet(e){ const m = e && e.sessions; return (m && typeof m==='object' && Object.keys(m).length) ? m : null; }
-function enrolleeAttendsSession(e, weekday, hour){ const m = enrolleeSessionSet(e); return !m || !!m[sessionKey(weekday,hour)]; }
-function enrolleeCourseHoursOn(course, e, date){
+function enrolleeAttendsSession(e, weekday, hour, courtId){ // courtId omesso = in qualsiasi campo a quell'ora
+  const m = enrolleeSessionSet(e); if(!m) return true;
+  if(m[weekday+'_'+hour]) return true; // formato vecchio, senza campo
+  if(courtId!=null && courtId!=='') return !!m[sessionKey(weekday,hour,courtId)];
+  const pre = weekday+'_'+hour+'_';
+  return Object.keys(m).some(k=>k.startsWith(pre));
+}
+function enrolleeCourseHoursOn(course, e, date){ // ore del giorno in cui l'iscritto ha lezione (una sola volta per ora)
+  if(!course || date < course.startDate || date > course.endDate) return [];
   const dow = new Date(date+'T00:00:00').getDay();
-  return courseHoursOn(course, date).filter(h=>enrolleeAttendsSession(e, dow, h));
+  const hs = getCourseSessions(course).filter(x=>x.weekday===dow && enrolleeAttendsSession(e, dow, x.hour, x.courtId)).map(x=>x.hour);
+  return [...new Set(hs)].sort((a,b)=>a-b);
+}
+function courtNameOf(courtId){ return ((state.club && state.club.courts || []).find(x=>x.id===courtId)||{}).name || ''; }
+function courseHasOverlap(course){ // due campi alla stessa ora nello stesso giorno
+  const seen = new Set();
+  return getCourseSessions(course).some(x=>{ const k=x.weekday+'_'+x.hour; if(seen.has(k)) return true; seen.add(k); return false; });
+}
+function enrolleeCourtName(course, e, weekday, hour){ // campo assegnato all'iscritto a quell'ora (solo se il corso ha due campi allo stesso orario)
+  if(!enrolleeSessionSet(e)) return '';
+  const opts = getCourseSessions(course).filter(x=>x.weekday===weekday && x.hour===hour);
+  if(opts.length < 2) return '';
+  const hit = opts.find(x=>enrolleeAttendsSession(e, weekday, hour, x.courtId));
+  return hit ? courtNameOf(hit.courtId) : '';
 }
 function getEnrollment(cid, eid){
   const e = (state.courseEnrollments[cid]||{})[eid];
   if(e) return e;
   return (state.myEnrollments && state.myEnrollments[cid]===eid) ? state.myEnrollmentData[cid] : undefined;
 }
-function freeSeatsAt(c, weekday, hour){ // posti liberi in una certa sessione del corso
+function freeSeatsAt(c, weekday, hour, courtId){ // posti liberi in una certa sessione del corso
   const cap = Number(c.maxSeats)||0;
-  const k = sessionKey(weekday, hour);
-  const taken = (c.seatsTaken && c.seatsTaken[k]!=null) ? Number(c.seatsTaken[k]) : (Number(c.enrolledCount)||0);
+  const st = c.seatsTaken || {};
+  const k = sessionKey(weekday, hour, courtId), k2 = sessionKey(weekday, hour);
+  const taken = st[k]!=null ? Number(st[k]) : (st[k2]!=null ? Number(st[k2]) : (Number(c.enrolledCount)||0));
   return Math.max(0, cap - taken);
 }
 function seatsTakenMap(cid){
   const c = state.courses[cid] || {}, enr = Object.values(state.courseEnrollments[cid]||{});
   const out = {};
-  getCourseSessions(c).forEach(x=>{ out[sessionKey(x.weekday,x.hour)] = enr.filter(e=>enrolleeAttendsSession(e,x.weekday,x.hour)).length; });
+  getCourseSessions(c).forEach(x=>{ out[sessionKey(x.weekday,x.hour,x.courtId)] = enr.filter(e=>enrolleeAttendsSession(e,x.weekday,x.hour,x.courtId)).length; });
   return out;
 }
 function syncSeatsTaken(cid){ // solo admin: tiene aggiornato courses/{cid}/seatsTaken, leggibile dai corsisti
@@ -1279,36 +1302,49 @@ function syncSeatsTaken(cid){ // solo admin: tiene aggiornato courses/{cid}/seat
 function uniqueSessions(course){
   const seen = new Set();
   return getCourseSessions(course).slice().sort((a,b)=>a.weekday-b.weekday||a.hour-b.hour)
-    .filter(x=>{ const k=sessionKey(x.weekday,x.hour); if(seen.has(k)) return false; seen.add(k); return true; });
+    .filter(x=>{ const k=sessionKey(x.weekday,x.hour,x.courtId); if(seen.has(k)) return false; seen.add(k); return true; });
 }
-function sessionLabel(x){ return WEEKDAY_FULL[x.weekday].slice(0,3)+' '+String(x.hour).padStart(2,'0')+':00'; }
+function sessionLabel(x, withCourt){ return WEEKDAY_FULL[x.weekday].slice(0,3)+' '+String(x.hour).padStart(2,'0')+':00'+(withCourt && courtNameOf(x.courtId) ? ' · '+courtNameOf(x.courtId) : ''); }
+function multiCourt(course){ return new Set(getCourseSessions(course).map(x=>x.courtId)).size > 1; }
 function sessionsSummary(course, e){ // es. "Lun 17:00 · Gio 18:00" oppure '' se frequenta tutte
   const m = enrolleeSessionSet(e); if(!m) return '';
-  return uniqueSessions(course).filter(x=>m[sessionKey(x.weekday,x.hour)]).map(sessionLabel).join(' · ');
+  const mc = multiCourt(course);
+  return uniqueSessions(course).filter(x=>enrolleeAttendsSession(e, x.weekday, x.hour, x.courtId)).map(x=>sessionLabel(x, mc)).join(' · ');
 }
 /* Caselle per scegliere le ore frequentate. onChange riceve: null (tutte), oggetto {chiave:true} oppure 'none' (nessuna spunta) */
 function buildSessionPicker(course, current, onChange){
   const sess = uniqueSessions(course);
+  const mc = multiCourt(course);
+  const sameSlot = (x,y)=>x.weekday===y.weekday && x.hour===y.hour;
+  const hasOverlap = sess.some((x,i)=>sess.some((y,j)=>i!==j && sameSlot(x,y)));
   const wrap = document.createElement('div');
   wrap.style.cssText = 'margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:8px;';
-  wrap.innerHTML = `<div class="hint" style="margin-bottom:6px;">Ore frequentate: spunta quelle assegnate</div>`;
+  wrap.innerHTML = `<div class="hint" style="margin-bottom:6px;">Ore frequentate: spunta quelle assegnate${hasOverlap?'. Dove ci sono due campi alla stessa ora, scegli quello del corsista.':''}</div>`;
   const cbs = [];
   const read = () => {
     const picked = sess.filter((x,i)=>cbs[i].checked);
     if(!picked.length) return 'none';
-    if(picked.length===sess.length) return null;
-    const m = {}; picked.forEach(x=>{ m[sessionKey(x.weekday,x.hour)] = true; });
+    if(picked.length===sess.length && !hasOverlap) return null;
+    const m = {}; picked.forEach(x=>{ m[sessionKey(x.weekday,x.hour,x.courtId)] = true; });
     return m;
   };
-  sess.forEach(x=>{
+  sess.forEach((x,i)=>{
     const lab = document.createElement('label');
     lab.style.cssText = 'display:flex;align-items:center;gap:10px;padding:5px 0;cursor:pointer;';
     const cb = document.createElement('input'); cb.type='checkbox'; cb.style.cssText='width:auto;margin:0;';
-    cb.checked = !current || !!current[sessionKey(x.weekday,x.hour)];
-    cb.onchange = () => onChange(read());
+    cb.checked = current ? enrolleeAttendsSession({sessions:current}, x.weekday, x.hour, x.courtId) : true;
+    cb.onchange = () => {
+      if(cb.checked) sess.forEach((y,j)=>{ if(j!==i && sameSlot(x,y)) cbs[j].checked = false; }); // un solo campo per ora
+      onChange(read());
+    };
     cbs.push(cb);
-    const t = document.createElement('span'); t.textContent = sessionLabel(x);
+    const t = document.createElement('span'); t.textContent = sessionLabel(x, mc);
     lab.appendChild(cb); lab.appendChild(t); wrap.appendChild(lab);
+  });
+  sess.forEach((x,i)=>{ // stato iniziale: se due campi sono spuntati alla stessa ora, resta solo il primo
+    if(!cbs[i].checked) return;
+    const firstIdx = sess.findIndex(y=>sameSlot(x,y));
+    if(firstIdx!==i && cbs[firstIdx].checked) cbs[i].checked = false;
   });
   wrap.getValue = read;
   return wrap;
@@ -1317,8 +1353,8 @@ function sessionsFull(cid, keys, excludeEid){ // prima sessione già al completo
   const c = state.courses[cid] || {}, enr = state.courseEnrollments[cid]||{};
   const cap = Number(c.maxSeats)||0;
   for(const x of uniqueSessions(c)){
-    if(keys && !keys[sessionKey(x.weekday,x.hour)]) continue;
-    const taken = Object.entries(enr).filter(([eid,e])=>eid!==excludeEid && enrolleeAttendsSession(e,x.weekday,x.hour)).length;
+    if(keys && !enrolleeAttendsSession({sessions:keys}, x.weekday, x.hour, x.courtId)) continue;
+    const taken = Object.entries(enr).filter(([eid,e])=>eid!==excludeEid && enrolleeAttendsSession(e,x.weekday,x.hour,x.courtId)).length;
     if(taken >= cap) return x;
   }
   return null;
@@ -1333,7 +1369,7 @@ function attAbsentCount(course, date, raw, e){ // ore di assenza del corsista in
   if(raw && typeof raw==='object') return Object.values(raw).filter(v=>v===false).length;
   return 0;
 }
-async function writeAttendance(cid, date, eid, hour, val){
+async function writeAttendance(cid, date, eid, hour, val, courtId){
   const course = state.courses[cid] || {};
   const path = cpath('courseAttendance/'+cid+'/'+date+'/'+eid);
   const raw = (await get(ref(db, path))).val();
@@ -1341,9 +1377,11 @@ async function writeAttendance(cid, date, eid, hour, val){
     const obj = {};
     courseHoursOn(course, date).forEach(h=>{ obj['h'+h] = raw; });
     obj['h'+hour] = val;
+    if(courtId) obj['c'+hour] = courtId;
     await set(ref(db, path), obj);
   } else {
-    await set(ref(db, path+'/h'+hour), val);
+    const upd = {}; upd['h'+hour] = val; if(courtId) upd['c'+hour] = courtId;
+    await update(ref(db, path), upd);
   }
 }
 
@@ -1417,17 +1455,25 @@ function askInfo({ title, text, okLabel }){
 
 /* Un corsista assente può tornare "presente" solo se il maestro non ha già inserito un sostituto
    che, tornando lui, resterebbe senza posto. I sostituti inseriti sono in courseSubstitutes/{cid}/{data}. */
-async function substituteBlocksReturn(cid, date, hour){
+async function substituteBlocksReturn(cid, date, hour, courtId){
   try{
     const c = state.courses[cid] || {};
     const [subSnap, attSnap] = await Promise.all([
       get(ref(db, cpath('courseSubstitutes/'+cid+'/'+date))),
       get(ref(db, cpath('courseAttendance/'+cid+'/'+date)))
     ]);
-    const subs = Object.keys(subSnap.val()||{}).length;
+    // un sostituto vale per questa ora/campo se il segnalino non indica altro (i vecchi segnalini valgono per tutta la giornata)
+    const subs = Object.values(subSnap.val()||{}).filter(m=>{
+      if(m && typeof m==='object') return (m.h==null || m.h===hour) && (m.c==null || !courtId || m.c===courtId);
+      return true;
+    }).length;
     if(!subs) return false;
-    const absent = Object.values(attSnap.val()||{}).filter(v=>attGet(v,hour)===false).length;
-    const free = freeSeatsAt(c, new Date(date+'T00:00:00').getDay(), hour);
+    const absent = Object.values(attSnap.val()||{}).filter(v=>{
+      if(attGet(v,hour)!==false) return false;
+      const tag = (v && typeof v==='object') ? v['c'+hour] : null; // campo registrato con l'assenza
+      return !tag || !courtId || tag===courtId;
+    }).length;
+    const free = freeSeatsAt(c, new Date(date+'T00:00:00').getDay(), hour, courtId);
     return subs >= absent + free; // tornando, il numero di posti non basterebbe per tutti i sostituti
   }catch(e){ console.warn('substituteBlocksReturn', e); return false; }
 }
@@ -1448,7 +1494,9 @@ function myWeekLessons(monday){
       const date = addDays(monday, i);
       if(date < c.startDate || date > c.endDate) continue;
       const dow = new Date(date+'T00:00:00').getDay();
-      getCourseSessions(c).filter(x=>x.weekday===dow && enrolleeAttendsSession(state.myEnrollmentData[cid], x.weekday, x.hour)).forEach(x=>{
+      const seenHours = new Set();
+      getCourseSessions(c).filter(x=>x.weekday===dow && enrolleeAttendsSession(state.myEnrollmentData[cid], x.weekday, x.hour, x.courtId)).forEach(x=>{
+        if(seenHours.has(x.hour)) return; seenHours.add(x.hour); // una persona non può essere su due campi alla stessa ora
         out.push({ cid, eid, date, hour:x.hour, courtId:x.courtId, name:c.name });
       });
     }
@@ -1522,7 +1570,7 @@ function renderWeekAttendanceCard(host){
         btn.textContent = absent ? 'Ci sarò' : 'Non ci sarò';
         btn.onclick = async () => {
           if(nowDate() >= attendanceCutoff(l.date, l.hour)){ toast('Tempo scaduto: rivolgiti al maestro'); renderApp(); return; }
-          if(absent && await substituteBlocksReturn(l.cid, l.date, l.hour)){ await warnSubstituteFound(l.name, l.date, l.hour); return; }
+          if(absent && await substituteBlocksReturn(l.cid, l.date, l.hour, l.courtId)){ await warnSubstituteFound(l.name, l.date, l.hour); return; }
           if(!absent){
             const ok = await askConfirm({
               title: 'Confermi che non ci sarai?',
@@ -1533,7 +1581,7 @@ function renderWeekAttendanceCard(host){
             if(nowDate() >= attendanceCutoff(l.date, l.hour)){ toast('Tempo scaduto: rivolgiti al maestro'); renderApp(); return; }
           }
           try{
-            await writeAttendance(l.cid, l.date, l.eid, l.hour, absent);
+            await writeAttendance(l.cid, l.date, l.eid, l.hour, absent, l.courtId);
             toast(absent ? 'Di nuovo presente, grazie!' : 'Assenza segnalata');
           }catch(e){ toast('Errore: '+e.message); }
         };
@@ -1585,29 +1633,32 @@ function enrolleeBacklog(fromCid, eid){
   const recovered = Object.values(recs).filter(r=>r && r.status==='present').length;
   return { absences, recovered, owed: Math.max(0, absences-recovered) };
 }
-function lessonRecoveries(toCid, date){
+function lessonRecoveries(toCid, date, hour, courtId){ // hour/courtId omessi = tutta la giornata
   const out = [];
   Object.entries(state.courseRecoveries||{}).forEach(([fromCid, byEid])=>{
     Object.entries(byEid||{}).forEach(([fromEid, recs])=>{
       Object.entries(recs||{}).forEach(([rid, rec])=>{
-        if(rec && rec.toCid===toCid && rec.toDate===date) out.push({ fromCid, fromEid, rid, rec });
+        if(!(rec && rec.toCid===toCid && rec.toDate===date)) return;
+        if(hour!==undefined && rec.toHour!=null && rec.toHour!==hour) return;               // recupero fissato su un'altra ora
+        if(courtId && rec.toCourtId && rec.toCourtId!==courtId) return;                     // ...o su un altro campo
+        out.push({ fromCid, fromEid, rid, rec });
       });
     });
   });
   return out;
 }
-function lessonHoles(cid, date, hour){
+function lessonHoles(cid, date, hour, courtId){
   const c = state.courses[cid] || {};
   const day = (state.courseAttendanceByCourse[cid] || {})[date] || {};
   const enrs = state.courseEnrollments[cid];
   const dow = new Date(date+'T00:00:00').getDay();
   const absent = Object.entries(day).filter(([eid,v])=>{
     const e = enrs ? enrs[eid] : undefined;
-    if(hour!==undefined && e && !enrolleeAttendsSession(e, dow, hour)) return false; // non è una sua ora
+    if(hour!==undefined && e && !enrolleeAttendsSession(e, dow, hour, courtId)) return false; // non è una sua ora/campo
     return hour===undefined ? attAbsentCount(c,date,v,e)>0 : attGet(v,hour)===false;
   }).length;
-  const free = hour===undefined ? Math.max(0, (Number(c.maxSeats)||0) - (Number(c.enrolledCount)||0)) : freeSeatsAt(c, dow, hour);
-  const taken = lessonRecoveries(cid, date).filter(x=>x.rec.status==='proposed' || x.rec.status==='present').length;
+  const free = hour===undefined ? Math.max(0, (Number(c.maxSeats)||0) - (Number(c.enrolledCount)||0)) : freeSeatsAt(c, dow, hour, courtId);
+  const taken = lessonRecoveries(cid, date, hour, courtId).filter(x=>x.rec.status==='proposed' || x.rec.status==='present').length;
   return { absent, free, taken, holes: Math.max(0, absent + free - taken) };
 }
 function enrolleePhone(e){
@@ -1631,10 +1682,13 @@ function recoveryCandidates(toCid, date){
   return out;
 }
 /* Segnalino leggibile dai corsisti del corso: "c'è un sostituto" (proposto o confermato) per quella data */
-async function syncSubstituteMarker(toCid, date, fromCid, fromEid, status){
+async function syncSubstituteMarker(toCid, date, fromCid, fromEid, status, hour, courtId){
   const mref = ref(db, cpath('courseSubstitutes/'+toCid+'/'+date+'/'+fromCid+'_'+fromEid));
   try{
-    if(status==='proposed' || status==='present') await set(mref, status);
+    if(status==='proposed' || status==='present'){
+      const m = { s: status }; if(hour!=null) m.h = hour; if(courtId) m.c = courtId;
+      await set(mref, (hour!=null || courtId) ? m : status);
+    }
     else await remove(mref);
   }catch(e){ console.warn('courseSubstitutes', e); }
 }
@@ -1648,17 +1702,18 @@ function backfillSubstituteMarkers(){ // per i recuperi inseriti prima di questa
         if(!rec || !rec.toCid || !rec.toDate || rec.toDate < today) return;
         if(rec.status!=='proposed' && rec.status!=='present') return;
         if(!(state.isAdmin || isTeacherOfCourse(rec.toCid))) return;
-        const k = rec.toCid+'|'+rec.toDate+'|'+fromCid+'|'+fromEid+'|'+rec.status;
+        const k = rec.toCid+'|'+rec.toDate+'|'+fromCid+'|'+fromEid+'|'+rec.status+'|'+(rec.toHour==null?'':rec.toHour)+'|'+(rec.toCourtId||'');
         if(markerSynced.has(k)) return;
         markerSynced.add(k);
-        syncSubstituteMarker(rec.toCid, rec.toDate, fromCid, fromEid, rec.status);
+        syncSubstituteMarker(rec.toCid, rec.toDate, fromCid, fromEid, rec.status, rec.toHour, rec.toCourtId);
       });
     });
   });
 }
-async function setRecovery(cd, toCid, date, status){
+async function setRecovery(cd, toCid, date, status, hour, courtId){
   const rec = {
     toCid, toDate:date, status,
+    ...(hour!=null ? { toHour: hour } : {}), ...(courtId ? { toCourtId: courtId } : {}),
     name: cd.name||'',
     phone: cd.phone!==undefined ? cd.phone : enrolleePhone(cd.e),
     fromCourse: cd.fromCourseName || (cd.c && cd.c.name) || '',
@@ -1667,7 +1722,7 @@ async function setRecovery(cd, toCid, date, status){
   };
   try{
     await set(ref(db, cpath('courseRecoveries/'+cd.fromCid+'/'+cd.fromEid+'/'+date+'_'+toCid)), rec);
-    await syncSubstituteMarker(toCid, date, cd.fromCid, cd.fromEid, status);
+    await syncSubstituteMarker(toCid, date, cd.fromCid, cd.fromEid, status, hour, courtId);
   }
   catch(err){ toast('Errore: '+err.message); }
 }
@@ -1715,19 +1770,19 @@ function attendanceButtons(cid, date, eid, cur, hour){
 }
 
 /* Pannello del maestro per una lezione: presenze, recuperi in programma, proposte a scorrimento infinito */
-function buildRecoveryPanel(cid, date, hour){
+function buildRecoveryPanel(cid, date, hour, courtId){
   const course = state.courses[cid];
   Object.keys(state.courses).forEach(id=>{ loadCourseEnrollments(id); loadCourseAttendanceAll(id); loadCourseRecoveries(id); });
   const loaded = Object.keys(state.courses).every(id=> state.courseEnrollments[id]!==undefined && state.courseAttendanceByCourse[id]!==undefined);
   const lessonKey = cid+'|'+date;
   const skipped = state.recoSkipped[lessonKey] || (state.recoSkipped[lessonKey] = {});
-  const hl = lessonHoles(cid, date, hour);
+  const hl = lessonHoles(cid, date, hour, courtId);
   const dow = new Date(date+'T00:00:00').getDay();
 
   const panel = document.createElement('div');
   panel.className = 'reco-panel';
   panel.innerHTML = `
-    <div class="section-title">${esc(course.name)} · ${WEEKDAY_FULL[dow]} ${fmtDateDisplay(date)} · ${String(hour).padStart(2,'0')}:00</div>
+    <div class="section-title">${esc(course.name)} · ${WEEKDAY_FULL[dow]} ${fmtDateDisplay(date)} · ${String(hour).padStart(2,'0')}:00${courtId && courtNameOf(courtId) ? ' · '+esc(courtNameOf(courtId)) : ''}</div>
     <div class="hint" style="margin-bottom:8px;">Posti da riempire: <b style="color:var(--chalk);">${hl.holes}</b> (assenti ${hl.absent}, posti liberi ${hl.free}, già coperti da recuperi ${hl.taken})</div>
     <div class="section-title" style="margin-top:8px;">Presenze della lezione</div>
     <div id="recoAtt"></div>
@@ -1741,7 +1796,7 @@ function buildRecoveryPanel(cid, date, hour){
 
   // presenze della lezione (il maestro può sempre segnare o cambiare)
   const attHost = panel.querySelector('#recoAtt');
-  const enr = Object.entries(state.courseEnrollments[cid]||{}).filter(([_,e])=>enrolleeAttendsSession(e, dow, hour));
+  const enr = Object.entries(state.courseEnrollments[cid]||{}).filter(([_,e])=>enrolleeAttendsSession(e, dow, hour, courtId));
   const day = (state.courseAttendanceByCourse[cid]||{})[date] || {};
   if(!enr.length) attHost.innerHTML = `<div class="hint">Nessun corsista iscritto.</div>`;
   enr.forEach(([eid,e])=>{
@@ -1753,7 +1808,7 @@ function buildRecoveryPanel(cid, date, hour){
 
   // recuperi già in programma per questa lezione
   const plannedHost = panel.querySelector('#recoPlanned');
-  const planned = lessonRecoveries(cid, date);
+  const planned = lessonRecoveries(cid, date, hour, courtId);
   if(!planned.length) plannedHost.innerHTML = `<div class="hint">Nessun recupero ancora proposto per questa lezione.</div>`;
   planned.forEach(p=>{
     const r = p.rec;
@@ -1770,7 +1825,7 @@ function buildRecoveryPanel(cid, date, hour){
       b.onclick = () => {
         if(r.status===st) return;
         if(st==='present' && !confirm('Confermi la presenza di '+r.name+'? Verrà recuperata in automatico 1 assenza arretrata.')) return;
-        setRecovery(cd, cid, date, st);
+        setRecovery(cd, cid, date, st, hour, courtId);
       };
       acts.appendChild(b);
     });
@@ -1815,17 +1870,17 @@ function buildRecoveryPanel(cid, date, hour){
     wa.disabled = !phone;
     wa.onclick = () => {
       window.open('https://wa.me/'+normalizePhone(phone)+'?text='+encodeURIComponent(recoveryMessage(cd, course, date, hour)), '_blank');
-      setRecovery(cd, cid, date, 'proposed');
+      setRecovery(cd, cid, date, 'proposed', hour, courtId);
     };
     const pr = document.createElement('button'); pr.className = 'small-btn'; pr.textContent = 'Presente';
     pr.onclick = () => {
       const msg = cd.owed>0
         ? 'Confermi la presenza di '+cd.name+'? Verrà recuperata in automatico 1 assenza arretrata.'
         : cd.name+' non ha ore da recuperare: registrare comunque la presenza?';
-      if(confirm(msg)) setRecovery(cd, cid, date, 'present');
+      if(confirm(msg)) setRecovery(cd, cid, date, 'present', hour, courtId);
     };
     const ab = document.createElement('button'); ab.className = 'small-btn'; ab.textContent = 'Assente';
-    ab.onclick = () => setRecovery(cd, cid, date, 'absent');
+    ab.onclick = () => setRecovery(cd, cid, date, 'absent', hour, courtId);
     const sk = document.createElement('button'); sk.className = 'small-btn'; sk.textContent = isSkipped ? 'Rimetti' : 'Salta';
     sk.onclick = () => { if(skipped[key]) delete skipped[key]; else skipped[key] = true; renderApp(); };
     [wa, pr, ab, sk].forEach(b=>acts.appendChild(b));
@@ -2910,7 +2965,7 @@ function renderCorsiScreen(host){
       if(!eid || !nl) return;
       if(nowDate() >= attendanceCutoff(nl.date, nl.hour)){ toast('Tempo scaduto: rivolgiti al maestro'); renderApp(); return; }
       const v = btn.dataset.v === '1';
-      if(v && await substituteBlocksReturn(cid, nl.date, nl.hour)){ await warnSubstituteFound(c.name, nl.date, nl.hour); return; }
+      if(v && await substituteBlocksReturn(cid, nl.date, nl.hour, nl.courtId)){ await warnSubstituteFound(c.name, nl.date, nl.hour); return; }
       if(!v){
         const ok = await askConfirm({
           title: 'Confermi che non ci sarai?',
@@ -2921,7 +2976,7 @@ function renderCorsiScreen(host){
         if(nowDate() >= attendanceCutoff(nl.date, nl.hour)){ toast('Tempo scaduto: rivolgiti al maestro'); renderApp(); return; }
       }
       try{
-        await writeAttendance(cid, nl.date, eid, nl.hour, v);
+        await writeAttendance(cid, nl.date, eid, nl.hour, v, nl.courtId);
         toast(v ? 'Di nuovo presente, grazie!' : 'Assenza segnalata');
       }catch(e){ toast('Errore: '+e.message); }
     };
@@ -3023,8 +3078,10 @@ function renderCorsiScreen(host){
         box.querySelector('#newEnrollPhone-'+cid).value = draft.phone;
       }
     }));
+    let addPicker = null;
     if(uniqueSessions(course).length > 1){
-      box.querySelector('#enrollSessHost-'+cid).appendChild(buildSessionPicker(course, (draft.sessions && draft.sessions!=='none') ? draft.sessions : null, v=>{ draft.sessions = v; }));
+      addPicker = buildSessionPicker(course, (draft.sessions && draft.sessions!=='none') ? draft.sessions : null, v=>{ draft.sessions = v; });
+      box.querySelector('#enrollSessHost-'+cid).appendChild(addPicker);
     }
     syncSeatsTaken(cid);
     box.querySelector('#newEnrollName-'+cid).oninput = (e)=>{ draft.name = e.target.value; };
@@ -3059,7 +3116,7 @@ function renderCorsiScreen(host){
               const val = picker.getValue();
               if(val==='none') return toast('Seleziona almeno un\'ora');
               const full = sessionsFull(cid, val, eid);
-              if(full) return toast('Ora al completo: '+sessionLabel(full));
+              if(full) return toast('Al completo: '+sessionLabel(full, multiCourt(course)));
               try{
                 await update(ref(db, cpath('courseEnrollments/'+cid+'/'+eid)), { sessions: val });
                 toast(val ? 'Ore salvate' : 'Frequenta tutte le ore');
@@ -3095,9 +3152,10 @@ function renderCorsiScreen(host){
       const phone = (draft.phone||'').trim();
       if(!name) return toast('Inserisci il nome o collega un socio');
       const courseNow = state.courses[cid];
+      if(addPicker) draft.sessions = addPicker.getValue(); // legge lo stato attuale delle caselle (ore e campo)
       if(draft.sessions==='none'){ toast('Seleziona almeno un\'ora'); return; }
       const fullSess = sessionsFull(cid, (draft.sessions && draft.sessions!=='none') ? draft.sessions : null, null);
-      if(fullSess){ toast(uniqueSessions(courseNow).length>1 ? 'Ora al completo: '+sessionLabel(fullSess) : 'Corso al completo'); return; }
+      if(fullSess){ toast(uniqueSessions(courseNow).length>1 ? 'Al completo: '+sessionLabel(fullSess, multiCourt(courseNow)) : 'Corso al completo'); return; }
       try{
         const newRef = push(ref(db, cpath('courseEnrollments/'+cid)));
         const eid = newRef.key;
@@ -3148,7 +3206,8 @@ function renderCorsiScreen(host){
           const myHours = realHours ? attHours.filter(h=>enrolleeAttendsSession(e, attDow, h)) : attHours;
           if(!myHours.length) return; // non ha ore in questo giorno
           const row = document.createElement('div'); row.className='list-row';
-          row.innerHTML = `<span>${esc(e.name)}</span>`;
+          const ct0 = myHours.length===1 ? enrolleeCourtName(c, e, attDow, myHours[0]) : '';
+          row.innerHTML = `<span>${esc(e.name)}${ct0?` <span class="pill" style="padding:2px 7px;">${esc(ct0)}</span>`:''}</span>`;
           if(myHours.length===1){
             row.appendChild(attendanceButtons(cid, state.attendanceDate, eid, att[eid], myHours[0]));
           } else {
@@ -3156,7 +3215,8 @@ function renderCorsiScreen(host){
             myHours.forEach(h=>{
               const sub = document.createElement('div');
               sub.style.cssText = 'display:flex;align-items:center;gap:8px;width:100%;justify-content:space-between;padding-top:4px;';
-              sub.innerHTML = `<span class="hint">${String(h).padStart(2,'0')}:00</span>`;
+              const ct = enrolleeCourtName(c, e, attDow, h);
+              sub.innerHTML = `<span class="hint">${String(h).padStart(2,'0')}:00${ct?' · '+esc(ct):''}</span>`;
               sub.appendChild(attendanceButtons(cid, state.attendanceDate, eid, att[eid], h));
               row.appendChild(sub);
             });
@@ -3305,7 +3365,7 @@ function renderMaestroScreen(host){
       if(dateStr < c.startDate || dateStr > c.endDate) return;
       getCourseSessions(c).filter(s=>s.weekday===dow).forEach(s=>{
         const court = (state.club.courts||[]).find(x=>x.id===s.courtId);
-        sessions.push({ cid, dateStr, hour: s.hour, courtName: court?court.name:'', courseName: c.name, enrolled: (c.seatsTaken && c.seatsTaken[sessionKey(s.weekday,s.hour)]!=null) ? c.seatsTaken[sessionKey(s.weekday,s.hour)] : (c.enrolledCount||0) });
+        sessions.push({ cid, dateStr, hour: s.hour, courtId: s.courtId, courtName: court?court.name:'', courseName: c.name, enrolled: (c.seatsTaken && c.seatsTaken[sessionKey(s.weekday,s.hour,s.courtId)]!=null) ? c.seatsTaken[sessionKey(s.weekday,s.hour,s.courtId)] : ((c.seatsTaken && c.seatsTaken[sessionKey(s.weekday,s.hour)]!=null) ? c.seatsTaken[sessionKey(s.weekday,s.hour)] : (c.enrolledCount||0)) });
       });
     });
     sessions.sort((a,b)=>a.hour-b.hour);
@@ -3366,13 +3426,13 @@ function renderMaestroScreen(host){
       row.innerHTML = `<span>${String(s.hour).padStart(2,'0')}:00 · ${s.courtName} · ${s.courseName} <span class="pill" style="padding:2px 7px;">corso</span></span><span class="pill">${s.enrolled} iscritti</span>`;
       sessionsHost.appendChild(row);
       {
-        const enr = Object.entries(state.courseEnrollments[s.cid]||{}).filter(([_,e])=>enrolleeAttendsSession(e, dow, s.hour));
+        const enr = Object.entries(state.courseEnrollments[s.cid]||{}).filter(([_,e])=>enrolleeAttendsSession(e, dow, s.hour, s.courtId));
         const dayAtt = (state.courseAttendanceByCourse[s.cid]||{})[d.dateStr] || {};
         const names = (test)=>enr.filter(([eid])=>test(attGet(dayAtt[eid], s.hour))).map(([_,e])=>esc(e.name||'—')).join(', ');
         const pres = enr.filter(([eid])=>attGet(dayAtt[eid], s.hour)===true).length;
         const abs = enr.filter(([eid])=>attGet(dayAtt[eid], s.hour)===false).length;
         const none = enr.length - pres - abs;
-        const guests = lessonRecoveries(s.cid, d.dateStr);
+        const guests = lessonRecoveries(s.cid, d.dateStr, s.hour, s.courtId);
         const lines = [];
         if(pres) lines.push(`<div><span class="pill" style="color:var(--ball);border-color:var(--ball);">Presenti (${pres})</span>${names(v=>v===true)}</div>`);
         if(abs) lines.push(`<div><span class="pill" style="color:var(--danger);border-color:var(--danger);">Assenti (${abs})</span>${names(v=>v===false)}</div>`);
@@ -3383,21 +3443,21 @@ function renderMaestroScreen(host){
           sessionsHost.appendChild(blk);
         }
       }
-      const hl = lessonHoles(s.cid, d.dateStr, s.hour);
+      const hl = lessonHoles(s.cid, d.dateStr, s.hour, s.courtId);
       const rs = state.recoverySession;
-      const isOpen = !!rs && rs.cid===s.cid && rs.date===d.dateStr && rs.hour===s.hour;
+      const isOpen = !!rs && rs.cid===s.cid && rs.date===d.dateStr && rs.hour===s.hour && (rs.courtId||'')===(s.courtId||'');
       const tog = document.createElement('button');
       tog.className = 'btn-ghost';
       tog.style.cssText = 'width:100%;margin:6px 0 10px;padding:9px;font-size:12px;';
       tog.textContent = (isOpen ? 'Chiudi presenze e recuperi' : 'Presenze e recuperi') + (hl.holes>0 ? ' · '+hl.holes+(hl.holes===1?' posto da riempire':' posti da riempire') : '');
       tog.onclick = () => {
-        state.recoverySession = isOpen ? null : { cid:s.cid, date:d.dateStr, hour:s.hour };
+        state.recoverySession = isOpen ? null : { cid:s.cid, date:d.dateStr, hour:s.hour, courtId:s.courtId };
         state.recoLimit = 15; state.recoScroll = 0; state.recoSearch = ''; state.recoAll = false;
         renderApp();
       };
       sessionsHost.appendChild(tog);
       if(isOpen){
-        const panel = buildRecoveryPanel(s.cid, d.dateStr, s.hour);
+        const panel = buildRecoveryPanel(s.cid, d.dateStr, s.hour, s.courtId);
         sessionsHost.appendChild(panel);
         if(panel._restore) panel._restore();
       }
