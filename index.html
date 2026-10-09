@@ -8,7 +8,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   :root{
-    --ink:#EFEEE6;--ink-dim:#AEB4C8;--board:#292E42;--board-2:#323852;--board-3:#3C4361;--line:#4B5373;
+    --ink:#EFEEE6;--ink-dim:#AEB4C8;--board:#1A1E2E;--board-2:#292E42;--board-3:#353B57;--line:#454C6B;
     --clay:#B5602F;--clay-dim:#7C4726;--chalk:#F4F1E6;--ball:#D7E85C;--ball-dim:#98A540;--danger:#E8705A;--clay-text:#E8996A;
     --radius:10px;--font-display:'Oswald',sans-serif;--font-body:'Inter',sans-serif;--font-mono:'IBM Plex Mono',monospace;
   }
@@ -1691,7 +1691,12 @@ function lessonHoles(cid, date, hour, courtId){
     if(hour!==undefined && e && !enrolleeAttendsSession(e, dow, hour, courtId)) return false; // non è una sua ora/campo
     return hour===undefined ? attAbsentCount(c,date,v,e)>0 : attGet(v,hour)===false;
   }).length;
-  const free = hour===undefined ? Math.max(0, (Number(c.maxSeats)||0) - (Number(c.enrolledCount)||0)) : freeSeatsAt(c, dow, hour, courtId);
+  let free;
+  if(hour===undefined) free = Math.max(0, (Number(c.maxSeats)||0) - (Number(c.enrolledCount)||0));
+  else if(enrs){ // iscrizioni caricate: conto solo chi ha davvero lezione a quell'ora (e su quel campo)
+    const attending = Object.values(enrs).filter(e=>enrolleeAttendsSession(e, dow, hour, courtId)).length;
+    free = Math.max(0, (Number(c.maxSeats)||0) - attending);
+  } else free = freeSeatsAt(c, dow, hour, courtId);
   const taken = lessonRecoveries(cid, date, hour, courtId).filter(x=>x.rec.status==='proposed' || x.rec.status==='present').length;
   return { absent, free, taken, holes: Math.max(0, absent + free - taken) };
 }
@@ -3515,7 +3520,7 @@ function renderMaestroScreen(host){
 
     card.className = 'mt-item' + (isOpen ? ' open' : '');
     card.innerHTML = `<div class="mt-head"><div class="mt-time">${pad(s.hour)}</div>
-      <div class="mt-meta"><div class="mt-name">${esc(s.courseName)}</div><div class="mt-sub">Corso${s.courtName?' · '+esc(s.courtName):''} · ${s.enrolled} iscritti</div></div>
+      <div class="mt-meta"><div class="mt-name">${esc(s.courseName)}</div><div class="mt-sub">Corso${s.courtName?' · '+esc(s.courtName):''} · ${state.courseEnrollments[s.cid]!==undefined ? enr.length : s.enrolled} iscritti</div></div>
       <span class="mt-chev">›</span></div>
       <div class="mt-chips">${chips.join('')}</div>`;
     card.querySelector('.mt-head').onclick = () => {
