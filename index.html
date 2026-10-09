@@ -61,6 +61,37 @@
   .slot.taken .who{display:block;font-size:9px;margin-top:2px;opacity:.8;}
   .slot.blocked{background:repeating-linear-gradient(45deg,var(--board),var(--board) 4px,rgba(193,83,59,.15) 4px,rgba(193,83,59,.15) 8px);color:#C99;cursor:default;border-color:var(--clay-dim);}
   .slot.past{opacity:.25;cursor:default;}
+  .slot{min-width:0;overflow:hidden;}
+  .slot.blocked .who{display:block;font-size:9px;margin-top:2px;opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .slot .who{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  /* calendario settimanale del corsista */
+  .wk-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;}
+  .wk-title{font-family:var(--font-display);font-size:22px;letter-spacing:.02em;color:var(--chalk);line-height:1.1;}
+  .wk-sub{font-family:var(--font-mono);font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--ball);margin-top:4px;}
+  .wk-nav{display:flex;gap:8px;flex-shrink:0;}
+  .wk-nav button{width:38px;height:38px;border-radius:50%;background:var(--board);border:1px solid var(--line);color:var(--ink);font-size:20px;line-height:1;padding:0;display:flex;align-items:center;justify-content:center;}
+  .wk-nav button:disabled{opacity:.35;cursor:default;}
+  .wk-info{font-size:12.5px;line-height:1.45;color:var(--ink-dim);background:var(--board);border:1px solid var(--line);border-radius:10px;padding:9px 12px;margin-bottom:12px;}
+  .wk-info b{color:var(--chalk);font-weight:600;}
+  .wk-empty{text-align:center;color:var(--ink-dim);font-size:13px;padding:22px 0 10px;}
+  .wk-day{display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-top:1px solid var(--line);}
+  .wk-day:first-of-type{border-top:none;padding-top:2px;}
+  .wk-date{flex:0 0 46px;text-align:center;border-radius:10px;background:var(--board);border:1px solid var(--line);padding:6px 0 7px;}
+  .wk-date .dw{display:block;font-family:var(--font-mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-dim);}
+  .wk-date .dn{display:block;font-family:var(--font-display);font-size:22px;line-height:1.1;color:var(--chalk);}
+  .wk-day.today .wk-date{background:var(--ball);border-color:var(--ball);}
+  .wk-day.today .wk-date .dw,.wk-day.today .wk-date .dn{color:#122019;}
+  .wk-lessons{flex:1;min-width:0;display:flex;flex-direction:column;gap:8px;}
+  .wk-lesson{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 12px;border-radius:10px;background:var(--board-2);border:1px solid var(--line);}
+  .wk-lesson.absent{background:rgba(193,83,59,.10);border-color:var(--danger);}
+  .wk-time{font-family:var(--font-display);font-size:21px;letter-spacing:.02em;color:var(--chalk);flex:0 0 auto;}
+  .wk-meta{flex:1 1 90px;min-width:0;}
+  .wk-name{font-weight:600;font-size:14px;color:var(--chalk);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .wk-court{font-size:12px;color:var(--ink-dim);margin-top:1px;}
+  .wk-act{display:flex;align-items:center;gap:8px;flex:0 0 auto;margin-left:auto;}
+  .wk-badge{font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.05em;border-radius:20px;padding:4px 10px;border:1px solid var(--ball-dim);color:var(--ball);white-space:nowrap;}
+  .wk-badge.abs{border-color:var(--danger);color:var(--danger);}
+  .wk-btn{padding:9px 14px;font-size:13px;border-radius:8px;white-space:nowrap;}
   .slot .mode-tag{display:block;font-size:8.5px;margin-top:1px;letter-spacing:.04em;text-transform:uppercase;opacity:.75;}
   .today-tally{display:flex;justify-content:space-between;align-items:center;background:var(--board);border:1px solid var(--line);border-radius:8px;padding:12px 14px;}
   .today-tally .num{font-family:var(--font-mono);font-size:22px;color:var(--ball);}
@@ -1436,48 +1467,60 @@ function renderWeekAttendanceCard(host){
   lessons.forEach(l=>loadMyAttendance(l.cid, l.date, l.eid));
   const pad = h => String(h).padStart(2,'0')+':00';
   const cutoffTxt = pad(getAttendanceCutoffHour());
+  const MON = ['gen','feb','mar','apr','mag','giu','lug','ago','set','ott','nov','dic'];
+  const parts = d => { const [,m,dd] = d.split('-').map(Number); return { d:dd, m:MON[m-1] }; };
+  const a = parts(monday), b = parts(addDays(monday,6));
+  const rangeTxt = a.m===b.m ? `${a.d} – ${b.d} ${b.m}` : `${a.d} ${a.m} – ${b.d} ${b.m}`;
 
   const card = document.createElement('div');
   card.className = 'card';
   card.innerHTML = `
-    <div class="section-title">Le tue lezioni della settimana</div>
-    <div class="btn-row" style="align-items:center;margin-bottom:6px;">
-      <button class="btn-ghost" id="weekAttPrev" ${monday<=thisMonday?'disabled style="opacity:.4;"':''}>‹</button>
-      <div class="hint" style="text-align:center;flex:1;">${fmtDateDisplay(monday)} → ${fmtDateDisplay(addDays(monday,6))}</div>
-      <button class="btn-ghost" id="weekAttNext">›</button>
+    <div class="wk-head">
+      <div>
+        <div class="wk-title">Le tue lezioni</div>
+        <div class="wk-sub">${monday===thisMonday?'Questa settimana':'Settimana'} · ${rangeTxt}</div>
+      </div>
+      <div class="wk-nav">
+        <button id="weekAttPrev" aria-label="Settimana precedente" ${monday<=thisMonday?'disabled':''}>‹</button>
+        <button id="weekAttNext" aria-label="Settimana successiva">›</button>
+      </div>
     </div>
-    <div class="hint" style="margin-bottom:8px;">Sei presente di default. Tocca "Non ci sarò" per segnalare un'assenza, entro le ${cutoffTxt} del giorno della lezione.</div>
+    <div class="wk-info">Sei presente di default. Se non puoi venire, tocca <b>Non ci sarò</b> entro le ${cutoffTxt} del giorno della lezione.</div>
     <div id="weekAttDays"></div>`;
   const daysHost = card.querySelector('#weekAttDays');
+  const todayStr = dateKey(now);
+  if(!lessons.length){
+    daysHost.innerHTML = `<div class="wk-empty">Nessuna lezione in questa settimana</div>`;
+  }
   for(let i=0;i<7;i++){
     const date = addDays(monday, i);
-    const dow = new Date(date+'T00:00:00').getDay();
     const dayLessons = lessons.filter(l=>l.date===date);
+    if(!dayLessons.length) continue;
+    const dow = new Date(date+'T00:00:00').getDay();
     const dayEl = document.createElement('div');
-    dayEl.style.cssText = 'border-top:1px solid var(--line);padding:8px 0;'+(date===dateKey(now)?'':'');
-    dayEl.innerHTML = `<div style="font-weight:600;color:var(--chalk);${dayLessons.length?'':'opacity:.5;'}">${WEEKDAY_FULL[dow]} ${fmtDateDisplay(date).slice(0,5)}${date===dateKey(now)?' · oggi':''}</div>`;
-    if(!dayLessons.length){
-      const e = document.createElement('div'); e.className='hint'; e.style.opacity='.5'; e.textContent='Nessuna lezione';
-      dayEl.appendChild(e);
-    }
+    dayEl.className = 'wk-day' + (date===todayStr ? ' today' : '');
+    dayEl.innerHTML = `<div class="wk-date"><span class="dw">${WEEKDAY_FULL[dow].slice(0,3)}</span><span class="dn">${parts(date).d}</span></div><div class="wk-lessons"></div>`;
+    const lessonsEl = dayEl.querySelector('.wk-lessons');
     dayLessons.forEach(l=>{
       const st = attGet(state.myAttendance[l.cid+'|'+l.date], l.hour);
       const absent = st === false;
       const open = now < attendanceCutoff(l.date, l.hour);
       const court = ((state.club.courts||[]).find(x=>x.id===l.courtId)||{}).name || '';
       const row = document.createElement('div');
-      row.className = 'list-row';
-      row.style.cssText = 'flex-wrap:wrap;gap:6px 8px;align-items:center;';
-      const info = document.createElement('span');
-      info.style.cssText = 'min-width:0;flex:1;';
-      info.innerHTML = `<b style="color:var(--chalk);">${pad(l.hour)}</b> · ${esc(l.name)}${court?' · '+esc(court):''}`;
-      row.appendChild(info);
+      row.className = 'wk-lesson' + (absent ? ' absent' : '');
+      row.innerHTML = `<div class="wk-time">${pad(l.hour)}</div>
+        <div class="wk-meta"><div class="wk-name">${esc(l.name)}</div>${court?`<div class="wk-court">${esc(court)}</div>`:''}</div>
+        <div class="wk-act"></div>`;
+      const act = row.querySelector('.wk-act');
       if(open){
-        const b = document.createElement('button');
-        b.className = absent ? 'btn-primary' : 'btn-clay';
-        b.style.cssText = 'padding:8px 12px;';
-        b.textContent = absent ? 'Ci sarò' : 'Non ci sarò';
-        b.onclick = async () => {
+        if(absent){
+          const badge = document.createElement('span'); badge.className = 'wk-badge abs'; badge.textContent = 'Assente';
+          act.appendChild(badge);
+        }
+        const btn = document.createElement('button');
+        btn.className = 'wk-btn ' + (absent ? 'btn-primary' : 'btn-clay');
+        btn.textContent = absent ? 'Ci sarò' : 'Non ci sarò';
+        btn.onclick = async () => {
           if(nowDate() >= attendanceCutoff(l.date, l.hour)){ toast('Tempo scaduto: rivolgiti al maestro'); renderApp(); return; }
           if(absent && await substituteBlocksReturn(l.cid, l.date, l.hour)){ await warnSubstituteFound(l.name, l.date, l.hour); return; }
           if(!absent){
@@ -1494,18 +1537,13 @@ function renderWeekAttendanceCard(host){
             toast(absent ? 'Di nuovo presente, grazie!' : 'Assenza segnalata');
           }catch(e){ toast('Errore: '+e.message); }
         };
-        if(absent){
-          const pill = document.createElement('span'); pill.className='pill'; pill.style.cssText='color:var(--danger);border-color:var(--danger);'; pill.textContent='Assente';
-          row.appendChild(pill);
-        }
-        row.appendChild(b);
+        act.appendChild(btn);
       } else {
-        const pill = document.createElement('span'); pill.className='pill';
-        if(absent) pill.style.cssText='color:var(--danger);border-color:var(--danger);';
-        pill.textContent = (absent ? 'Assente' : 'Presente') + ' · chiuso';
-        row.appendChild(pill);
+        const badge = document.createElement('span'); badge.className = 'wk-badge' + (absent ? ' abs' : '');
+        badge.textContent = (absent ? 'Assente' : 'Presente') + ' · chiuso';
+        act.appendChild(badge);
       }
-      dayEl.appendChild(row);
+      lessonsEl.appendChild(row);
     });
     daysHost.appendChild(dayEl);
   }
