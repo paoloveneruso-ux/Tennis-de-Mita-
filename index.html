@@ -8,8 +8,8 @@
 <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   :root{
-    --ink:#EFEEE6;--ink-dim:#A9B3AC;--board:#122019;--board-2:#182B22;--board-3:#1F3A2C;--line:#33493C;
-    --clay:#B5602F;--clay-dim:#7C4726;--chalk:#F4F1E6;--ball:#D7E85C;--ball-dim:#7C8534;--danger:#C1533B;
+    --ink:#EFEEE6;--ink-dim:#AEB4C8;--board:#292E42;--board-2:#323852;--board-3:#3C4361;--line:#4B5373;
+    --clay:#B5602F;--clay-dim:#7C4726;--chalk:#F4F1E6;--ball:#D7E85C;--ball-dim:#98A540;--danger:#E8705A;--clay-text:#E8996A;
     --radius:10px;--font-display:'Oswald',sans-serif;--font-body:'Inter',sans-serif;--font-mono:'IBM Plex Mono',monospace;
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
@@ -35,9 +35,9 @@
   button{font-family:var(--font-display);text-transform:uppercase;letter-spacing:.03em;font-weight:600;border:none;border-radius:8px;padding:12px 16px;font-size:14px;cursor:pointer;transition:transform .1s ease, opacity .15s;}
   button:active{transform:scale(0.97);}
   button:disabled{opacity:.35;cursor:default;}
-  .btn-primary{background:var(--ball);color:#16220F;}
+  .btn-primary{background:var(--ball);color:#161A2B;}
   .btn-ghost{background:transparent;color:var(--ink);border:1px solid var(--line);}
-  .btn-danger{background:var(--danger);color:var(--chalk);}
+  .btn-danger{background:#C1533B;color:var(--chalk);}
   .btn-clay{background:var(--clay);color:var(--chalk);}
   .hint{font-size:12.5px;color:var(--ink-dim);line-height:1.5;}
   .error-box{background:rgba(193,83,59,.12);border:1px solid var(--danger);color:#F0B3A6;padding:10px 12px;border-radius:8px;font-size:13px;}
@@ -80,7 +80,7 @@
   .wk-date .dw{display:block;font-family:var(--font-mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-dim);}
   .wk-date .dn{display:block;font-family:var(--font-display);font-size:22px;line-height:1.1;color:var(--chalk);}
   .wk-day.today .wk-date{background:var(--ball);border-color:var(--ball);}
-  .wk-day.today .wk-date .dw,.wk-day.today .wk-date .dn{color:#122019;}
+  .wk-day.today .wk-date .dw,.wk-day.today .wk-date .dn{color:#161A2B;}
   .wk-lessons{flex:1;min-width:0;display:flex;flex-direction:column;gap:8px;}
   .wk-lesson{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 12px;border-radius:10px;background:var(--board-2);border:1px solid var(--line);}
   .wk-lesson.absent{background:rgba(193,83,59,.10);border-color:var(--danger);}
@@ -104,7 +104,7 @@
   .mt-day.empty{opacity:.5;}
   .mt-day.today:not(.sel){border-color:var(--ball-dim);}
   .mt-day.sel{background:var(--ball);border-color:var(--ball);opacity:1;}
-  .mt-day.sel .dw,.mt-day.sel .dn,.mt-day.sel .cnt{color:#122019;}
+  .mt-day.sel .dw,.mt-day.sel .dn,.mt-day.sel .cnt{color:#161A2B;}
   .mt-dayhead{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:10px;}
   .mt-daytitle{font-family:var(--font-display);font-size:20px;letter-spacing:.02em;color:var(--chalk);}
   .mt-empty{text-align:center;color:var(--ink-dim);font-size:13px;padding:18px 0 8px;}
@@ -132,13 +132,13 @@
   .who-bar .me{font-size:13px;color:var(--ink-dim);display:flex;align-items:center;gap:8px;}
   .who-bar .me b{color:var(--chalk);font-weight:600;}
   .avatar{width:34px;height:34px;border-radius:50%;object-fit:cover;background:var(--board);border:1px solid var(--line);flex-shrink:0;}
-  .avatar-initials{width:34px;height:34px;border-radius:50%;background:var(--ball-dim);color:#16220F;display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-size:14px;flex-shrink:0;}
+  .avatar-initials{width:34px;height:34px;border-radius:50%;background:var(--ball-dim);color:#161A2B;display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-size:14px;flex-shrink:0;}
   .avatar-lg{width:88px;height:88px;border-radius:50%;object-fit:cover;background:var(--board);border:1px solid var(--line);}
-  .avatar-lg-initials{width:88px;height:88px;border-radius:50%;background:var(--ball-dim);color:#16220F;display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-size:32px;}
+  .avatar-lg-initials{width:88px;height:88px;border-radius:50%;background:var(--ball-dim);color:#161A2B;display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-size:32px;}
   .seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;}
   .seg button{flex:1;padding:10px 6px;background:transparent;color:var(--ink-dim);border:none;border-right:1px solid var(--line);font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.05em;cursor:pointer;}
   .seg button:last-child{border-right:none;}
-  .seg button.active{background:var(--ball);color:#16220F;}
+  .seg button.active{background:var(--ball);color:#161A2B;}
   .picker-list{display:none;margin-top:6px;background:var(--board);border:1px solid var(--line);border-radius:8px;max-height:230px;overflow-y:auto;}
   .picker.open .picker-list{display:block;}
   .picker-opt{padding:11px 12px;font-size:15px;border-bottom:1px solid var(--line);cursor:pointer;}
@@ -154,7 +154,7 @@
   .pay-month{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;flex-wrap:wrap;}
   .pay-opts{display:flex;gap:6px;}
   .small-btn.on-due{border-color:var(--danger);color:var(--danger);}
-  .small-btn.on-paid{background:var(--ball);border-color:var(--ball);color:#16220F;}
+  .small-btn.on-paid{background:var(--ball);border-color:var(--ball);color:#161A2B;}
   .small-btn.on-exempt{border-color:var(--ball);color:var(--ball);}
   .reco-panel{margin:8px 0 12px;padding:12px;border:1px solid var(--ball-dim);border-radius:10px;background:var(--board);}
   .reco-scroll{max-height:52vh;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:0 10px;}
@@ -177,7 +177,7 @@
   .member-row:last-child,.list-row:last-child{border-bottom:none;}
   .member-row .name{font-weight:600;font-size:14.5px;}
   .pill{font-family:var(--font-mono);font-size:12px;background:var(--board);border:1px solid var(--line);border-radius:20px;padding:4px 10px;color:var(--ball);white-space:nowrap;}
-  .pill.adminpill{color:var(--clay);border-color:var(--clay-dim);}
+  .pill.adminpill{color:var(--clay-text);border-color:var(--clay-dim);}
   .small-btn{background:transparent;border:1px solid var(--line);color:var(--ink-dim);padding:6px 9px;font-size:11px;border-radius:6px;white-space:nowrap;}
   .section-title{font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-dim);margin-bottom:4px;}
   .mode-choice{display:flex;gap:8px;}
@@ -2690,7 +2690,7 @@ function openTeacherPickerAndBook(court, hour, label, target){
           ${available.map(([id,m])=>`<option value="${m.uid}">${m.name}</option>`).join('')}
         </select>
       </div>
-      <div class="hint" style="color:var(--clay);border:1px solid var(--clay-dim);border-radius:8px;padding:8px;">Ricorda: prima di confermare, contatta privatamente il maestro per assicurarti che sia davvero disponibile in questo orario. La prenotazione qui non lo avvisa automaticamente.</div>
+      <div class="hint" style="color:var(--clay-text);border:1px solid var(--clay-dim);border-radius:8px;padding:8px;">Ricorda: prima di confermare, contatta privatamente il maestro per assicurarti che sia davvero disponibile in questo orario. La prenotazione qui non lo avvisa automaticamente.</div>
       <div class="hint">Non sarà annullabile nelle 24 ore precedenti l'orario.</div>
       <div class="btn-row">
         <button class="btn-ghost" id="cancelPick">Annulla</button>
@@ -4046,7 +4046,7 @@ function renderAdminScreen(host){
       ruleRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid var(--line);';
       ruleRow.innerHTML = `
         <div style="display:flex;gap:3px;flex-wrap:wrap;">
-          ${WD_SHORT.map((w,wi)=>`<button type="button" class="small-btn wdBtn" data-bi="${bi}" data-ri="${ri}" data-wd="${wi}" style="${rule.weekdays.includes(wi)?'background:var(--ball);color:#16220F;border-color:var(--ball);':''}padding:5px 8px;">${w}</button>`).join('')}
+          ${WD_SHORT.map((w,wi)=>`<button type="button" class="small-btn wdBtn" data-bi="${bi}" data-ri="${ri}" data-wd="${wi}" style="${rule.weekdays.includes(wi)?'background:var(--ball);color:#161A2B;border-color:var(--ball);':''}padding:5px 8px;">${w}</button>`).join('')}
         </div>
         <input type="number" class="ruleStart" data-bi="${bi}" data-ri="${ri}" min="${OPEN_HOUR}" max="${CLOSE_HOUR}" value="${rule.startHour}" style="width:60px;">
         <span class="hint">→</span>
@@ -4343,7 +4343,7 @@ function renderAdminScreen(host){
   currentTeachers.forEach(([id,m])=>{
     const uid = m.uid;
     const row = document.createElement('div'); row.className='member-row';
-    row.innerHTML = `<span class="name">${esc(m.name)}</span><span class="pill" style="border-color:var(--clay-dim);color:var(--clay);">Maestro</span>`;
+    row.innerHTML = `<span class="name">${esc(m.name)}</span><span class="pill" style="border-color:var(--clay-dim);color:var(--clay-text);">Maestro</span>`;
     const btn = document.createElement('button');
     btn.className = 'small-btn';
     btn.textContent = 'Rimuovi maestro';
