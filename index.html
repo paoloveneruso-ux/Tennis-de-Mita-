@@ -3433,7 +3433,7 @@ function renderMaestroScreen(host){
           <button id="nextWeek" aria-label="Settimana successiva">›</button>
         </div>
       </div>
-      <div class="mt-sum"><span>Settimana: <b>${weekHours}h</b> di lezioni · <b>€ ${weekRevenue.toFixed(2)}</b></span><button class="mt-today" id="thisWeek">Oggi</button></div>
+      <div class="mt-sum"><span>Settimana: <b>${weekHours}h</b> di lezioni private</span><button class="mt-today" id="thisWeek">Oggi</button></div>
       <div class="mt-strip" id="dayStrip"></div>
     </div>
     <div class="card" id="dayCard"></div>
@@ -3469,7 +3469,7 @@ function renderMaestroScreen(host){
       <div class="hint">${total ? total+(total===1?' impegno':' impegni') : ''}</div>
     </div>
     <div id="mtItems"></div>
-    ${d.hours ? `<div class="list-row"><span>Lezioni private</span><span class="pill">${d.hours}h · € ${d.revenue.toFixed(2)}</span></div>` : ''}`;
+    ${d.hours ? `<div class="list-row"><span>Lezioni private</span><span class="pill">${d.hours}h</span></div>` : ''}`;
   const itemsHost = dayCard.querySelector('#mtItems');
   if(!total){ itemsHost.innerHTML = `<div class="mt-empty">Niente in programma</div>`; return; }
 
@@ -3486,7 +3486,7 @@ function renderMaestroScreen(host){
       card.className = 'mt-item static';
       card.innerHTML = `<div class="mt-head"><div class="mt-time">${pad(l.hour)}</div>
         <div class="mt-meta"><div class="mt-name">${esc(l.clientName||'—')}</div><div class="mt-sub">Lezione privata${l.courtName?' · '+esc(l.courtName):''}</div></div>
-        <span class="pill">€ ${(l.rate||0).toFixed(2)}</span></div>`;
+        </div>`;
       itemsHost.appendChild(card);
       return;
     }
