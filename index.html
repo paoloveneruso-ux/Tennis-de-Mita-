@@ -856,8 +856,12 @@ function blockStatus(payMap, blk){
   const set = new Set(blk.map(m=>payStatus(payMap, m)));
   return set.size===1 ? [...set][0] : 'mixed';
 }
-function courseDueSummary(course, payMap, billing){
-  const fee = Number(course.monthlyFee)||0;
+const LEVELS_ALL = ['Principianti','Base','Intermedio','Avanzato','Agonisti'];
+/* Quota e livello personalizzati per iscritto: courseEnrollments/{cid}/{eid}/fee e /livello (se mancano valgono quelli del corso) */
+function enrolleeFee(c, e){ return (e && e.fee!=null && e.fee!=='' && !isNaN(Number(e.fee))) ? Number(e.fee) : (Number(c && c.monthlyFee)||0); }
+function enrolleeLevel(c, e){ return (e && e.livello) ? e.livello : ((c && c.livello) || ''); }
+function courseDueSummary(course, payMap, billing, e){
+  const fee = enrolleeFee(course, e);
   const blocks = billingBlocks(course, billing);
   const months = blocks.flat();
   const s = { blocks, months, due:0, paid:0, exempt:0, dueMonths:[], methods:new Set(), fee, billing: billing==='monthly' ? 'monthly' : 'bimonthly' };
@@ -878,7 +882,7 @@ function payPill(s){
 }
 async function setPaymentBlock(cid, eid, months, status, method){
   const c = state.courses[cid] || {};
-  const fee = Number(c.monthlyFee) || 0;
+  const fee = enrolleeFee(c, (state.courseEnrollments[cid]||{})[eid]);
   const now = Date.now();
   const prevMeta = (((state.coursePayments[cid]||{})[eid]) || {})._meta || {};
   const obj = {};
@@ -910,6 +914,27 @@ function buildPayDetail(r, repaint){
   info.className = 'hint'; info.style.marginBottom = '6px';
   info.textContent = 'Quota € '+fmtEuro(s.fee)+'/mese'+(monthly ? '' : ' · € '+fmtEuro(s.fee*2)+' ogni 2 mesi')+(r.e.phone ? ' · '+r.e.phone : '');
   det.appendChild(info);
+  { // quota e livello personalizzati di questo iscritto
+    const box = document.createElement('div');
+    box.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:2px 0 10px;align-items:end;';
+    const levelOpts = LEVELS_ALL.map(l=>`<option value="${l}" ${r.e.livello===l?'selected':''}>${l}</option>`).join('');
+    box.innerHTML = `
+      <div><div class="hint" style="margin-bottom:4px;">Quota mensile (€)</div>
+        <input type="number" min="0" step="1" inputmode="decimal" placeholder="${esc(String(Number(r.c.monthlyFee)||0))}" value="${r.e.fee!=null && r.e.fee!=='' ? esc(String(r.e.fee)) : ''}" class="enr-fee"></div>
+      <div><div class="hint" style="margin-bottom:4px;">Livello</div>
+        <select class="enr-level"><option value="">Come il corso${r.c.livello?' ('+esc(r.c.livello)+')':''}</option>${levelOpts}</select></div>
+      <button class="btn-ghost enr-save" style="grid-column:1 / -1;padding:9px;font-size:12px;">Salva quota e livello</button>`;
+    box.querySelector('.enr-save').onclick = async () => {
+      const feeRaw = box.querySelector('.enr-fee').value.trim();
+      const lvl = box.querySelector('.enr-level').value;
+      if(feeRaw!=='' && (isNaN(Number(feeRaw)) || Number(feeRaw)<0)){ toast('Quota non valida'); return; }
+      try{
+        await update(ref(db, cpath('courseEnrollments/'+r.cid+'/'+r.eid)), { fee: feeRaw==='' ? null : Number(feeRaw), livello: lvl || null });
+        toast('Salvato');
+      }catch(err){ toast('Errore: '+err.message); }
+    };
+    det.appendChild(box);
+  }
   const lab = document.createElement('div');
   lab.className = 'hint'; lab.textContent = 'Modalità di pagamento';
   det.appendChild(lab);
@@ -1038,7 +1063,7 @@ function collectPayments(){
         if(!mt || !mt.t || (mt.m!=='cash' && mt.m!=='card')){ legacy++; return; }
         const key = cid+'|'+eid+'|'+mt.t+'|'+mt.m;
         const g = groups[key] || (groups[key] = { cid, eid, t:mt.t, method:mt.m, amount:0, months:[], ym: ymOfTs(mt.t) });
-        g.amount += Number(mt.a!=null ? mt.a : c.monthlyFee) || 0;
+        g.amount += Number(mt.a!=null ? mt.a : enrolleeFee(c, (state.courseEnrollments[cid]||{})[eid])) || 0;
         g.months.push(m);
       });
     });
@@ -1189,7 +1214,7 @@ function renderPaymentsScreen(host){
       const pays = state.coursePayments[cid] || {};
       Object.entries(enr).forEach(([eid,e])=>{
         const payMap = pays[eid] || {};
-        all.push({ key:cid+'|'+eid, cid, eid, c, e, payMap, s:courseDueSummary(c, payMap, e.billing), name:e.name||'—' });
+        all.push({ key:cid+'|'+eid, cid, eid, c, e, payMap, s:courseDueSummary(c, payMap, e.billing, e), name:e.name||'—' });
       });
     });
     const totDue = all.reduce((a,r)=>a+r.s.dueAmount, 0);
@@ -1715,7 +1740,8 @@ function recoveryCandidates(toCid, date){
     Object.entries(state.courseEnrollments[cid2]||{}).forEach(([eid, e])=>{
       if(already.has(cid2+'|'+eid)) return;
       const bl = enrolleeBacklog(cid2, eid);
-      out.push({ fromCid:cid2, fromEid:eid, e, c:c2, owed:bl.owed, sameLevel: normTxt(c2.livello||'').trim()===lvl, name:e.name||'—' });
+      const elv = enrolleeLevel(c2, e);
+      out.push({ fromCid:cid2, fromEid:eid, e, c:c2, owed:bl.owed, level: elv, sameLevel: normTxt(elv).trim()===lvl, name:e.name||'—' });
     });
   });
   return out;
@@ -1902,7 +1928,7 @@ function buildRecoveryPanel(cid, date, hour, courtId){
     const phone = enrolleePhone(cd.e);
     const row = document.createElement('div');
     row.className = 'reco-row' + (isSkipped ? ' skipped' : '');
-    row.innerHTML = `<div class="pay-head" style="cursor:default;"><div style="min-width:0;"><div class="pay-name">${esc(cd.name)}${isFirst&&!isSkipped?' <span class="pill" style="padding:2px 7px;">prossimo consigliato</span>':''}</div><div class="hint">${esc(cd.c.name)} · livello ${esc(cd.c.livello||'-')}${cd.sameLevel?'':' · <b>altro livello</b>'}${isSkipped?' · saltato':''}</div></div><span class="pill" style="${cd.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${cd.owed>0?cd.owed+(cd.owed===1?' ora':' ore')+' da recuperare':'nessuna ora da recuperare'}</span></div>`;
+    row.innerHTML = `<div class="pay-head" style="cursor:default;"><div style="min-width:0;"><div class="pay-name">${esc(cd.name)}${isFirst&&!isSkipped?' <span class="pill" style="padding:2px 7px;">prossimo consigliato</span>':''}</div><div class="hint">${esc(cd.c.name)} · livello ${esc(cd.level||cd.c.livello||'-')}${cd.sameLevel?'':' · <b>altro livello</b>'}${isSkipped?' · saltato':''}</div></div><span class="pill" style="${cd.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${cd.owed>0?cd.owed+(cd.owed===1?' ora':' ore')+' da recuperare':'nessuna ora da recuperare'}</span></div>`;
     const acts = document.createElement('div'); acts.className = 'reco-actions';
     const wa = document.createElement('button'); wa.className = 'btn-ghost'; wa.style.cssText = 'flex:1;padding:8px 10px;font-size:12px;';
     wa.textContent = phone ? 'Invia messaggio' : 'Nessun numero';
@@ -2914,13 +2940,13 @@ function renderCorsiScreen(host){
         <div class="list-row" style="flex-wrap:wrap;gap:4px 8px;"><span>Assenze</span><span class="pill" style="${bl.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${bl.absences} · recuperate ${bl.recovered} · da recuperare ${bl.owed}</span></div>`;
     }
     const billing = (state.myEnrollmentData[cid]||{}).billing;
-    const sum = courseDueSummary(c, payMap, billing);
+    const sum = courseDueSummary(c, payMap, billing, state.myEnrollmentData[cid]);
     totalDue += sum.dueAmount;
     const rowsHtml = sum.blocks.length ? sum.blocks.map(blk=>{
       const st = blockStatus(payMap, blk);
       return st==='mixed' ? blk.map(m=>acctRow(fmtMonth(m), payStatus(payMap,m))).join('') : acctRow(fmtBlock(blk), st);
     }).join('') : '<div class="hint">Nessun pagamento ancora dovuto.</div>';
-    return { name:c.name, fee:c.monthlyFee, billing, rowsHtml, statsHtml };
+    return { name:c.name, fee:sum.fee, billing, rowsHtml, statsHtml };
   }).filter(Boolean);
 
   const acctCard = document.createElement('div');
@@ -3135,11 +3161,13 @@ function renderCorsiScreen(host){
       if(!filtered.length){ enrollListHost.innerHTML = `<div class="hint">Nessun corsista trovato.</div>`; return; }
       filtered.forEach(([eid,e])=>{
         const payMap = paymentsForCourse[eid] || {};
-        const r = { key:cid+'|'+eid, cid, eid, c:course, e, payMap, s:courseDueSummary(course, payMap, e.billing), name:e.name||'—' };
+        const r = { key:cid+'|'+eid, cid, eid, c:course, e, payMap, s:courseDueSummary(course, payMap, e.billing, e), name:e.name||'—' };
         const pill = payPill(r.s);
         const row = document.createElement('div'); row.className = 'pay-row';
         row.innerHTML = `<div class="pay-head"><div style="min-width:0;"><div class="pay-name">${esc(e.name)}${e.uid?' <span class="pill" style="padding:2px 7px;">collegato</span>':''}</div><div class="hint">${e.phone?esc(e.phone)+' · ':''}${e.billing==='monthly'?'pagamento mensile':'pagamento bimestrale'}</div></div><span class="pill" style="${pill.style}">${pill.label}</span></div>`;
-        { const sum = sessionsSummary(course, e); const h = row.querySelector('.hint'); if(sum && h) h.insertAdjacentHTML('beforeend', '<br>Ore: '+esc(sum)); }
+        { const sum = sessionsSummary(course, e); const h = row.querySelector('.hint'); if(sum && h) h.insertAdjacentHTML('beforeend', '<br>Ore: '+esc(sum));
+          const extra = []; if(e.fee!=null && e.fee!=='') extra.push('quota € '+fmtEuro(Number(e.fee))); if(e.livello) extra.push('livello '+esc(e.livello));
+          if(extra.length && h) h.insertAdjacentHTML('beforeend', '<br>Personalizzato: '+extra.join(' · ')); }
         row.querySelector('.pay-head').onclick = () => {
           if(state.payExpanded[r.key]) delete state.payExpanded[r.key]; else state.payExpanded[r.key] = true;
           paintEnrollList(state.enrollSearchText[cid]||'');
