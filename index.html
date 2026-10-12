@@ -1764,15 +1764,17 @@ function enrolleePhone(e){
   if(e && e.uid){ const m = Object.values(state.members||{}).find(x=>x && x.uid===e.uid); if(m && m.phone) return m.phone; }
   return '';
 }
-function recoveryCandidates(toCid, date){
+function recoveryCandidates(toCid, date, hour, courtId){
   const target = state.courses[toCid] || {};
   const lvl = normTxt(target.livello||'').trim();
   const already = new Set(lessonRecoveries(toCid, date).map(x=>x.fromCid+'|'+x.fromEid));
+  const dow = new Date(date+'T00:00:00').getDay();
   const out = [];
   Object.entries(state.courses||{}).forEach(([cid2, c2])=>{
-    if(cid2===toCid) return;
     Object.entries(state.courseEnrollments[cid2]||{}).forEach(([eid, e])=>{
       if(already.has(cid2+'|'+eid)) return;
+      // stesso corso (es. macrocorso): proponibile solo se NON ha già lezione in quest'ora/campo
+      if(cid2===toCid && (hour==null || enrolleeAttendsSession(e, dow, hour, courtId))) return;
       const bl = enrolleeBacklog(cid2, eid);
       const elv = enrolleeLevel(c2, e);
       out.push({ fromCid:cid2, fromEid:eid, e, c:c2, owed:bl.owed, level: elv, sameLevel: normTxt(elv).trim()===lvl, name:e.name||'—' });
@@ -1946,7 +1948,7 @@ function buildRecoveryPanel(cid, date, hour, courtId){
   const scroll = panel.querySelector('#recoScroll');
   function computeRows(){
     const q = normTxt(state.recoSearch.trim());
-    const all = recoveryCandidates(cid, date);
+    const all = recoveryCandidates(cid, date, hour, courtId);
     let rows;
     if(q) rows = all.filter(x=>normTxt(x.name).includes(q));           // ricerca manuale: qualsiasi livello, anche senza ore da recuperare
     else if(state.recoAll) rows = all.filter(x=>x.owed>0);
