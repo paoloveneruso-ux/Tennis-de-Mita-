@@ -227,6 +227,7 @@
   .modal-overlay{position:fixed;inset:0;background:rgba(20,22,34,.62);display:flex;align-items:flex-end;justify-content:center;z-index:99999;}
   .modal{background:var(--board-2);border:1px solid var(--line);border-radius:14px 14px 0 0;padding:20px;width:100%;max-width:520px;max-height:88vh;overflow-y:auto;display:flex;flex-direction:column;gap:14px;box-shadow:0 -8px 40px rgba(0,0,0,.35);}
   .modal h4{margin:0;font-family:var(--font-display);text-transform:uppercase;font-size:17px;}
+  .name-link{background:none;border:none;padding:0;margin:0;font:inherit;color:var(--chalk);text-align:left;cursor:pointer;text-decoration:underline dotted;text-underline-offset:4px;}
   .copy-code{font-family:var(--font-mono);font-size:26px;letter-spacing:.12em;text-align:center;background:var(--tile);border:1px dashed var(--clay);border-radius:8px;padding:14px;color:var(--ball-text);}
   .btn-row{display:flex;gap:10px;}
   .btn-row button{flex:1;}
@@ -1543,6 +1544,71 @@ function askInfo({ title, text, okLabel }){
     ov.addEventListener('click', e=>{ if(e.target===ov) done(); });
     ov.querySelector('#ifOk').onclick = done;
     document.body.appendChild(ov);
+  });
+}
+
+/* ===== Riepilogo assenze e recuperi di un corsista (corsista, maestro, admin) =====
+   Ogni recupero confermato "presente" copre l'assenza più vecchia ancora aperta (stessa regola del conteggio). */
+async function showAbsenceHistory(cid, eid){
+  const course = state.courses[cid] || {};
+  const e = getEnrollment(cid, eid) || {};
+  let hist = state.courseAttendanceByCourse[cid], recsRaw;
+  try{
+    if(hist===undefined) hist = (await get(ref(db, cpath('courseAttendance/'+cid)))).val() || {};
+    recsRaw = (await get(ref(db, cpath('courseRecoveries/'+cid+'/'+eid)))).val() || {};
+  }catch(err){ toast('Errore: '+err.message); return; }
+
+  const today = todayKey();
+  const dayLabel = d => WEEKDAY_FULL[new Date(d+'T00:00:00').getDay()].slice(0,3)+' '+fmtDateDisplay(d);
+  const hh = h => h==null ? '' : ' · '+String(h).padStart(2,'0')+':00';
+
+  // una voce per ogni ORA di assenza, in ordine di data
+  const absences = [];
+  Object.keys(hist||{}).sort().forEach(date=>{
+    const raw = (hist[date]||{})[eid];
+    let hours = [];
+    if(raw===false){
+      hours = e && Object.keys(e).length ? enrolleeCourseHoursOn(course, e, date) : courseHoursOn(course, date);
+      if(!hours.length) hours = [null];
+    } else if(raw && typeof raw==='object'){
+      hours = Object.keys(raw).filter(k=>/^h\d+$/.test(k) && raw[k]===false).map(k=>Number(k.slice(1))).sort((a,b)=>a-b);
+    }
+    hours.forEach(h=>absences.push({ date, hour:h }));
+  });
+
+  const recs = Object.entries(recsRaw).filter(([_,r])=>r && r.toDate).map(([rid,r])=>Object.assign({ rid }, r))
+    .sort((a,b)=> a.toDate.localeCompare(b.toDate) || ((a.toHour==null?0:a.toHour)-(b.toHour==null?0:b.toHour)));
+  const done = recs.filter(r=>r.status==='present');
+  const owed = Math.max(0, absences.length - done.length);
+  const recLabel = r => { const cn = (state.courses[r.toCid]||{}).name; return dayLabel(r.toDate)+hh(r.toHour)+(cn ? ' · '+esc(cn) : ''); };
+  const pillOk = 'color:var(--ok-text);border-color:var(--ok-border);';
+  const pillBad = 'color:var(--danger);border-color:var(--danger);';
+
+  const absHtml = absences.length ? absences.map((a,i)=>{
+    const r = done[i];
+    return `<div class="list-row" style="flex-wrap:wrap;gap:4px 8px;">
+      <div style="min-width:0;"><div>${dayLabel(a.date)}${hh(a.hour)}${a.date>today?' <span class="hint">(in programma)</span>':''}</div>${r?`<div class="hint">Recuperata: ${recLabel(r)}</div>`:''}</div>
+      <span class="pill" style="${r?pillOk:pillBad}">${r?'Recuperata':'Da recuperare'}</span></div>`;
+  }).join('') : '<div class="hint">Nessuna assenza registrata.</div>';
+
+  const stMap = { present:['Fatto',pillOk], proposed:['Proposto',''], absent:['Assente al recupero',pillBad] };
+  const recHtml = recs.length ? recs.map(r=>{
+    const st = stMap[r.status] || [r.status||'', ''];
+    return `<div class="list-row" style="flex-wrap:wrap;gap:4px 8px;"><span>${recLabel(r)}</span><span class="pill" style="${st[1]}">${esc(st[0])}</span></div>`;
+  }).join('') : '<div class="hint">Nessun recupero ancora proposto o fatto.</div>';
+
+  await askInfo({
+    title: e.name || 'Corsista',
+    okLabel: 'Chiudi',
+    text: `<div class="hint" style="margin-bottom:8px;">${esc(course.name||'')}</div>
+      <div class="list-row" style="flex-wrap:wrap;gap:4px 8px;"><span>Ore di assenza</span><span class="pill">${absences.length}</span></div>
+      <div class="list-row"><span>Recuperate</span><span class="pill" style="${done.length?pillOk:''}">${done.length}</span></div>
+      <div class="list-row"><span>Da recuperare</span><span class="pill" style="${owed>0?pillBad:''}">${owed}</span></div>
+      <div class="section-title" style="margin-top:14px;">Lezioni saltate</div>
+      ${absHtml}
+      <div class="hint" style="margin:6px 0 0;">Ogni recupero fatto copre l'assenza più vecchia ancora aperta.</div>
+      <div class="section-title" style="margin-top:14px;">Recuperi</div>
+      ${recHtml}`
   });
 }
 
@@ -2976,7 +3042,8 @@ function renderCorsiScreen(host){
       const presences = Math.max(0, lessonsHeld(c, myE) - countAbsences(c, state.courseAttendanceByCourse[cid], myEid2, myE));
       const bl = enrolleeBacklog(cid, myEid2);
       statsHtml = `<div class="list-row"><span>Presenze</span><span class="pill">${presences}</span></div>
-        <div class="list-row" style="flex-wrap:wrap;gap:4px 8px;"><span>Assenze</span><span class="pill" style="${bl.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${bl.absences} · recuperate ${bl.recovered} · da recuperare ${bl.owed}</span></div>`;
+        <div class="list-row" style="flex-wrap:wrap;gap:4px 8px;"><span>Assenze</span><span class="pill" style="${bl.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${bl.absences} · recuperate ${bl.recovered} · da recuperare ${bl.owed}</span></div>
+        <button class="btn-ghost" data-act="absHist" data-cid="${esc(cid)}" data-eid="${esc(myEid2)}" style="width:100%;margin:6px 0;">Vedi assenze e recuperi</button>`;
     }
     const billing = (state.myEnrollmentData[cid]||{}).billing;
     const sum = courseDueSummary(c, payMap, billing, state.myEnrollmentData[cid]);
@@ -3003,6 +3070,7 @@ function renderCorsiScreen(host){
     <div class="totale-box"><span class="l">Totale da saldare</span><span class="v" style="${totalDue>0?'color:var(--danger);':''}">€ ${totalDue.toFixed(2)}</span></div>
   `;
   acctHost.appendChild(acctCard);
+  acctCard.querySelectorAll('[data-act="absHist"]').forEach(b=>{ b.onclick = () => showAbsenceHistory(b.dataset.cid, b.dataset.eid); });
 
   const cardsHost = screen.querySelector('#courseCards');
   const courseSelect = screen.querySelector('#courseSelect');
@@ -3295,6 +3363,7 @@ function renderCorsiScreen(host){
         box.innerHTML = `
           <div class="section-title">Presenze — ${fmtDateDisplay(state.attendanceDate)}</div>
           <div class="field"><label>Sessione</label><input id="attDate-${cid}" type="date" value="${state.attendanceDate}"></div>
+          <div class="hint">Tocca il nome di un corsista per vedere le sue assenze e i recuperi.</div>
           <div id="attList-${cid}" style="margin-top:8px;"></div>
         `;
         detailHost.appendChild(box);
@@ -3314,7 +3383,8 @@ function renderCorsiScreen(host){
           const myHours = realHours ? attHours.filter(h=>enrolleeAttendsSession(e, attDow, h)) : attHours;
           if(!myHours.length) return; // non ha ore in questo giorno
           const row = document.createElement('div'); row.className='list-row';
-          row.innerHTML = `<span>${esc(e.name)}</span>`;
+          row.innerHTML = `<button type="button" class="name-link">${esc(e.name)}</button>`;
+          row.querySelector('.name-link').onclick = () => showAbsenceHistory(cid, eid);
           if(myHours.length===1){
             row.appendChild(attendanceButtons(cid, state.attendanceDate, eid, att[eid], myHours[0]));
           } else {
@@ -3365,7 +3435,7 @@ function renderCorsiScreen(host){
         box.style.marginTop = '12px'; box.style.borderTop='1px solid var(--line)'; box.style.paddingTop='12px';
         box.innerHTML = `
           <div class="section-title">Assenze — ${course.name} (${course.livello||''})</div>
-          <div class="hint" style="margin-bottom:8px;">Ordinati per ore ancora da recuperare (assenze meno recuperi confermati dal maestro). Per invitare un corsista al recupero usa la scheda Maestro → Presenze e recuperi.</div>
+          <div class="hint" style="margin-bottom:8px;">Ordinati per ore ancora da recuperare (assenze meno recuperi confermati dal maestro). Per invitare un corsista al recupero usa la scheda Maestro → Presenze e recuperi. Tocca un nome per vedere le lezioni saltate e i recuperi.</div>
           <div id="absenceList-${cid}"></div>
         `;
         detailHost.appendChild(box);
@@ -3373,7 +3443,8 @@ function renderCorsiScreen(host){
         if(!stats.length){ listHost.innerHTML = `<div class="hint">Nessun dato di presenza ancora registrato.</div>`; }
         stats.forEach(st=>{
           const row = document.createElement('div'); row.className='list-row'; row.style.flexWrap='wrap'; row.style.gap='4px 8px';
-          row.innerHTML = `<span>${esc(st.e.name)}</span><span class="pill" style="${st.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${st.absences} assenze · ${st.recovered} recuperate · ${st.presences} presenze</span>`;
+          row.innerHTML = `<button type="button" class="name-link">${esc(st.e.name)}</button><span class="pill" style="${st.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${st.absences} assenze · ${st.recovered} recuperate · ${st.presences} presenze</span>`;
+          row.querySelector('.name-link').onclick = () => showAbsenceHistory(cid, st.eid);
           listHost.appendChild(row);
         });
       }
