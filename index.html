@@ -107,6 +107,7 @@
   .wk-act{display:flex;align-items:center;gap:8px;flex:0 0 auto;margin-left:auto;}
   .wk-badge{font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.05em;border-radius:20px;padding:4px 10px;border:1px solid var(--ok-border);color:var(--ok-text);white-space:nowrap;}
   .wk-badge.abs{border-color:var(--danger);color:var(--danger);}
+  .wk-badge.rain,.pill.rain,.mt-chip.rain{border-color:var(--ball-dim);color:var(--ball-text);}
   .wk-btn{padding:9px 14px;font-size:13px;border-radius:8px;white-space:nowrap;}
   /* vista maestro: striscia dei giorni e sessioni compatte */
   .mt-sum{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:13px;color:var(--ink-dim);margin-bottom:4px;}
@@ -1479,6 +1480,99 @@ async function writeAttendance(cid, date, eid, hour, val, courtId){
   }
 }
 
+/* ===== Assenze per PIOGGIA =====
+   L'admin annulla un'intera ora: a ogni corsista che ha lezione a quell'ora si scrive, nel suo record di presenza,
+   l'assenza con l'etichetta pioggia:  courseAttendance/{cid}/{data}/{eid} = { h17:false, r17:'r' }
+   ('r' = era presente, 'a' = si era già segnato assente: resta UNA sola assenza, ora "per pioggia").
+   Le assenze per pioggia si recuperano per prime (peso maggiore delle assenze per impegni personali). */
+function attRain(raw, hour){ return !!(raw && typeof raw==='object' && raw['h'+hour]===false && raw['r'+hour]); }
+function attRainCount(raw){ // ore di assenza per pioggia in quel giorno
+  if(!(raw && typeof raw==='object')) return 0;
+  return Object.keys(raw).filter(k=>/^r\d+$/.test(k) && raw[k] && raw['h'+k.slice(1)]===false).length;
+}
+function lessonRainOn(cid, date, hour){ // ora annullata per pioggia: almeno un iscritto di quell'ora ha l'etichetta
+  const day = ((state.courseAttendanceByCourse[cid]||{})[date]) || state.courseAttendance[cid+'|'+date] || {};
+  return Object.values(day).some(v=>attRain(v, hour));
+}
+async function setRainHour(cid, date, hour, on){
+  const course = state.courses[cid] || {};
+  const dow = new Date(date+'T00:00:00').getDay();
+  const dayRef = ref(db, cpath('courseAttendance/'+cid+'/'+date));
+  const [enrSnap, attSnap] = await Promise.all([ get(ref(db, cpath('courseEnrollments/'+cid))), get(dayRef) ]);
+  const enr = enrSnap.val() || {}, att = attSnap.val() || {};
+  const upd = {}; let n = 0;
+  Object.entries(enr).forEach(([eid, e])=>{
+    if(!e || !enrolleeAttendsSession(e, dow, hour)) return;
+    const raw = att[eid];
+    if(raw===true || raw===false){ // dato vecchio per tutto il giorno: lo scompongo per ora
+      if(!on) return; // senza etichetta pioggia non c'è nulla da ripristinare
+      const obj = {}; courseHoursOn(course, date).forEach(h=>{ obj['h'+h] = raw; });
+      obj['h'+hour] = false; obj['r'+hour] = raw===false ? 'a' : 'r';
+      upd[eid] = obj; n++; return;
+    }
+    const tag = (raw && typeof raw==='object') ? raw['r'+hour] : undefined;
+    if(on){
+      if(tag) return; // già annullata per pioggia
+      upd[eid+'/r'+hour] = (attGet(raw, hour)===false) ? 'a' : 'r';
+      upd[eid+'/h'+hour] = false;
+      n++;
+    } else {
+      if(!tag) return;
+      if(tag!=='a') upd[eid+'/h'+hour] = null; // era presente: torna presente; se era già assente, resta la sua assenza
+      upd[eid+'/r'+hour] = null;
+      n++;
+    }
+  });
+  if(Object.keys(upd).length) await update(dayRef, upd);
+  if(on){ // i recuperi solo proposti a questa lezione decadono (quelli già confermati restano)
+    for(const pr of lessonRecoveries(cid, date, hour).filter(x=>x.rec.status==='proposed')) await removeRecovery(pr);
+  }
+  return n;
+}
+async function setRainAllCourses(date, hour, on){
+  let n = 0, courses = 0;
+  for(const [cid, c] of Object.entries(state.courses||{})){
+    if(!courseHoursOn(c, date).includes(hour)) continue;
+    n += await setRainHour(cid, date, hour, on); courses++;
+  }
+  return { n, courses };
+}
+function rainControl(cid, date, hour){ // solo admin: annulla/ripristina l'ora per tutti i corsisti
+  if(!state.isAdmin) return null;
+  const active = lessonRainOn(cid, date, hour);
+  const hh2 = String(hour).padStart(2,'0')+':00';
+  const when = WEEKDAY_FULL[new Date(date+'T00:00:00').getDay()]+' '+fmtDateDisplay(date)+' alle '+hh2;
+  const cname = (state.courses[cid]||{}).name || '';
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;margin:6px 0;';
+  const lab = document.createElement('span'); lab.className = 'pill' + (active ? ' rain' : '');
+  lab.textContent = hh2 + ' · ' + (active ? 'annullata per pioggia' : 'pioggia');
+  wrap.appendChild(lab);
+  const mk = (txt, fn) => {
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'small-btn'; b.textContent = txt;
+    b.onclick = async () => { b.disabled = true; try{ await fn(); }catch(err){ toast('Errore: '+err.message); } b.disabled = false; };
+    wrap.appendChild(b);
+  };
+  mk(active ? 'Ripristina ora' : 'Annulla per pioggia', async () => {
+    const msg = active
+      ? 'Ripristinare la lezione di '+cname+' di '+when+'?\nLe assenze per pioggia di quest\'ora vengono tolte (chi si era segnato assente da solo resta assente).'
+      : 'Annullare per pioggia la lezione di '+cname+' di '+when+' per tutti i corsisti?\nOgnuno avrà UNA assenza per pioggia (anche chi si era già segnato assente), da recuperare con priorità. I recuperi solo proposti a questa lezione vengono tolti.';
+    if(!confirm(msg)) return;
+    const n = await setRainHour(cid, date, hour, !active);
+    toast(active ? 'Ora ripristinata ('+n+' corsisti)' : 'Ora annullata per pioggia ('+n+' corsisti)');
+  });
+  const sameHour = Object.values(state.courses||{}).filter(c=>courseHoursOn(c, date).includes(hour)).length;
+  if(sameHour > 1) mk(active ? 'Ripristina tutti i corsi' : 'Pioggia su tutti i corsi', async () => {
+    const msg = active
+      ? 'Ripristinare le '+hh2+' di '+fmtDateDisplay(date)+' in tutti i '+sameHour+' corsi?'
+      : 'Annullare per pioggia le '+hh2+' di '+fmtDateDisplay(date)+' in tutti i '+sameHour+' corsi, per tutti i corsisti?\nOgnuno avrà UNA assenza per pioggia da recuperare con priorità.';
+    if(!confirm(msg)) return;
+    const r = await setRainAllCourses(date, hour, !active);
+    toast((active ? 'Ripristinate' : 'Annullate per pioggia')+': '+r.courses+' corsi, '+r.n+' corsisti');
+  });
+  return wrap;
+}
+
 function lessonsHeld(course, e){ // numero di ORE di lezione svolte finora (per l'iscritto e, se indicato)
   const today = todayKey();
   const end = course.endDate < today ? course.endDate : today;
@@ -1573,21 +1667,25 @@ async function showAbsenceHistory(cid, eid){
     } else if(raw && typeof raw==='object'){
       hours = Object.keys(raw).filter(k=>/^h\d+$/.test(k) && raw[k]===false).map(k=>Number(k.slice(1))).sort((a,b)=>a-b);
     }
-    hours.forEach(h=>absences.push({ date, hour:h }));
+    hours.forEach(h=>absences.push({ date, hour:h, rain: !!(raw && typeof raw==='object' && raw['r'+h]) }));
   });
 
   const recs = Object.entries(recsRaw).filter(([_,r])=>r && r.toDate).map(([rid,r])=>Object.assign({ rid }, r))
     .sort((a,b)=> a.toDate.localeCompare(b.toDate) || ((a.toHour==null?0:a.toHour)-(b.toHour==null?0:b.toHour)));
   const done = recs.filter(r=>r.status==='present');
   const owed = Math.max(0, absences.length - done.length);
+  // ogni recupero fatto copre prima le assenze per pioggia, poi le altre (dalla più vecchia)
+  const queue = absences.map((_,i)=>i).sort((x,y)=> (absences[y].rain?1:0)-(absences[x].rain?1:0) || x-y);
+  const paired = {}; queue.slice(0, done.length).forEach((idx,k)=>{ paired[idx] = done[k]; });
+  const rainN = absences.filter(a=>a.rain).length;
   const recLabel = r => { const cn = (state.courses[r.toCid]||{}).name; return dayLabel(r.toDate)+hh(r.toHour)+(cn ? ' · '+esc(cn) : ''); };
   const pillOk = 'color:var(--ok-text);border-color:var(--ok-border);';
   const pillBad = 'color:var(--danger);border-color:var(--danger);';
 
   const absHtml = absences.length ? absences.map((a,i)=>{
-    const r = done[i];
+    const r = paired[i];
     return `<div class="list-row" style="flex-wrap:wrap;gap:4px 8px;">
-      <div style="min-width:0;"><div>${dayLabel(a.date)}${hh(a.hour)}${a.date>today?' <span class="hint">(in programma)</span>':''}</div>${r?`<div class="hint">Recuperata: ${recLabel(r)}</div>`:''}</div>
+      <div style="min-width:0;"><div>${dayLabel(a.date)}${hh(a.hour)}${a.rain?' <span class="pill rain" style="padding:2px 7px;">Pioggia</span>':''}${a.date>today?' <span class="hint">(in programma)</span>':''}</div>${r?`<div class="hint">Recuperata: ${recLabel(r)}</div>`:''}</div>
       <span style="display:flex;align-items:center;gap:6px;"><span class="pill" style="${r?pillOk:pillBad}">${r?'Recuperata':'Da recuperare'}</span>${state.isAdmin?`<button type="button" class="small-btn abs-rm" data-date="${a.date}" data-hour="${a.hour==null?'':a.hour}" style="color:var(--danger);border-color:var(--danger);">Rimuovi</button>`:''}</span></div>`;
   }).join('') : '<div class="hint">Nessuna assenza registrata.</div>';
 
@@ -1602,11 +1700,12 @@ async function showAbsenceHistory(cid, eid){
     okLabel: 'Chiudi',
     text: `<div class="hint" style="margin-bottom:8px;">${esc(course.name||'')}</div>
       <div class="list-row" style="flex-wrap:wrap;gap:4px 8px;"><span>Ore di assenza</span><span class="pill">${absences.length}</span></div>
+      ${rainN>0 ? `<div class="list-row"><span>Di cui per pioggia</span><span class="pill rain">${rainN}</span></div>` : ''}
       <div class="list-row"><span>Recuperate</span><span class="pill" style="${done.length?pillOk:''}">${done.length}</span></div>
       <div class="list-row"><span>Da recuperare</span><span class="pill" style="${owed>0?pillBad:''}">${owed}</span></div>
       <div class="section-title" style="margin-top:14px;">Lezioni saltate</div>
       ${absHtml}
-      <div class="hint" style="margin:6px 0 0;">Ogni recupero fatto copre l'assenza più vecchia ancora aperta.</div>
+      <div class="hint" style="margin:6px 0 0;">Ogni recupero fatto copre prima le assenze per pioggia, poi le altre dalla più vecchia.</div>
       <div class="section-title" style="margin-top:14px;">Recuperi</div>
       ${recHtml}`
   });
@@ -1641,7 +1740,7 @@ async function removeAbsence(cid, date, eid, hour){
     return;
   }
   if(raw && typeof raw==='object' && hour!=null){
-    const upd = {}; upd['h'+hour] = null; upd['c'+hour] = null;
+    const upd = {}; upd['h'+hour] = null; upd['c'+hour] = null; upd['r'+hour] = null;
     await update(ref(db, path), upd);
   }
 }
@@ -1745,6 +1844,7 @@ function renderWeekAttendanceCard(host){
     dayLessons.forEach(l=>{
       const st = attGet(state.myAttendance[l.cid+'|'+l.date], l.hour);
       const absent = st === false;
+      const rainDay = attRain(state.myAttendance[l.cid+'|'+l.date], l.hour);
       const open = now < attendanceCutoff(l.date, l.hour);
       const court = ((state.club.courts||[]).find(x=>x.id===l.courtId)||{}).name || '';
       const row = document.createElement('div');
@@ -1753,7 +1853,10 @@ function renderWeekAttendanceCard(host){
         <div class="wk-meta"><div class="wk-name">${esc(l.name)}</div>${court?`<div class="wk-court">${esc(court)}</div>`:''}</div>
         <div class="wk-act"></div>`;
       const act = row.querySelector('.wk-act');
-      if(open){
+      if(rainDay){
+        const badge = document.createElement('span'); badge.className = 'wk-badge rain'; badge.textContent = 'Annullata per pioggia';
+        act.appendChild(badge);
+      } else if(open){
         if(absent){
           const badge = document.createElement('span'); badge.className = 'wk-badge abs'; badge.textContent = 'Assente';
           act.appendChild(badge);
@@ -1818,13 +1921,14 @@ function loadCourseRecoveries(cid){
 /* Ore da recuperare = assenze registrate − presenze di recupero confermate dal maestro */
 function enrolleeBacklog(fromCid, eid){
   const hist = state.courseAttendanceByCourse[fromCid] || {};
-  let absences = 0;
+  let absences = 0, rain = 0;
   const fromCourse = state.courses[fromCid];
   const fromE = getEnrollment(fromCid, eid);
-  Object.entries(hist).forEach(([date,dm])=>{ if(dm) absences += attAbsentCount(fromCourse, date, dm[eid], fromE); });
+  Object.entries(hist).forEach(([date,dm])=>{ if(dm){ absences += attAbsentCount(fromCourse, date, dm[eid], fromE); rain += attRainCount(dm[eid]); } });
   const recs = (state.courseRecoveries[fromCid] || {})[eid] || {};
   const recovered = Object.values(recs).filter(r=>r && r.status==='present').length;
-  return { absences, recovered, owed: Math.max(0, absences-recovered) };
+  // le assenze per pioggia hanno la precedenza: ogni recupero fatto copre prima quelle
+  return { absences, recovered, owed: Math.max(0, absences-recovered), rain, rainOwed: Math.max(0, rain-recovered) };
 }
 function lessonRecoveries(toCid, date, hour, courtId){ // hour/courtId omessi = tutta la giornata
   const out = [];
@@ -1857,7 +1961,8 @@ function lessonHoles(cid, date, hour, courtId){
     free = Math.max(0, (Number(c.maxSeats)||0) - attending);
   } else free = freeSeatsAt(c, dow, hour, courtId);
   const taken = lessonRecoveries(cid, date, hour, courtId).filter(x=>x.rec.status==='proposed' || x.rec.status==='present').length;
-  return { absent, free, taken, holes: Math.max(0, absent + free - taken) };
+  const rainOn = hour!==undefined && Object.values(day).some(v=>attRain(v, hour));
+  return { absent, free, taken, holes: rainOn ? 0 : Math.max(0, absent + free - taken), rain: rainOn }; // ora annullata per pioggia: nessun posto da riempire
 }
 function enrolleePhone(e){
   if(e && e.phone) return e.phone;
@@ -1877,7 +1982,7 @@ function recoveryCandidates(toCid, date, hour, courtId){
       if(cid2===toCid && (hour==null || enrolleeAttendsSession(e, dow, hour, courtId))) return;
       const bl = enrolleeBacklog(cid2, eid);
       const elv = enrolleeLevel(c2, e);
-      out.push({ fromCid:cid2, fromEid:eid, e, c:c2, owed:bl.owed, level: elv, sameLevel: normTxt(elv).trim()===lvl, name:e.name||'—' });
+      out.push({ fromCid:cid2, fromEid:eid, e, c:c2, owed:bl.owed, rain:bl.rain, rainOwed:bl.rainOwed, level: elv, sameLevel: normTxt(elv).trim()===lvl, name:e.name||'—' });
     });
   });
   return out;
@@ -1943,6 +2048,7 @@ function recoveryMessage(cd, toCourse, date, hour){
 function attendanceButtons(cid, date, eid, cur, hour){
   const wrap = document.createElement('div');
   wrap.className = 'pay-opts';
+  if(attRain(cur, hour)){ wrap.innerHTML = '<span class="pill rain">Pioggia</span>'; return wrap; } // annullata per pioggia: l'admin la ripristina dal controllo pioggia
   [[true,'Presente','on-paid'],[false,'Assente','on-due']].forEach(([val,lab,cls])=>{
     const b = document.createElement('button');
     const curH = attGet(cur, hour);
@@ -1985,6 +2091,7 @@ function buildRecoveryPanel(cid, date, hour, courtId){
   panel.innerHTML = `
     <div class="section-title">${esc(course.name)} · ${WEEKDAY_FULL[dow]} ${fmtDateDisplay(date)} · ${String(hour).padStart(2,'0')}:00${courtId && courtNameOf(courtId) ? ' · '+esc(courtNameOf(courtId)) : ''}</div>
     <div class="hint" style="margin-bottom:8px;">Posti da riempire: <b style="color:var(--chalk);">${hl.holes}</b> (assenti ${hl.absent}, posti liberi ${hl.free}, già coperti da recuperi ${hl.taken})</div>
+    <div id="recoRain"></div>
     <div class="section-title" style="margin-top:8px;">Presenze della lezione</div>
     <div id="recoAtt"></div>
     <div class="section-title" style="margin-top:14px;">Recuperi in programma</div>
@@ -2006,6 +2113,12 @@ function buildRecoveryPanel(cid, date, hour, courtId){
     row.appendChild(attendanceButtons(cid, date, eid, day[eid], hour));
     attHost.appendChild(row);
   });
+
+  // pioggia: avviso per tutti, controllo per l'admin
+  const rainOn = lessonRainOn(cid, date, hour);
+  const rainHost = panel.querySelector('#recoRain');
+  if(rainOn) rainHost.innerHTML = `<div class="hint" style="color:var(--ball-text);margin-bottom:6px;">Lezione annullata per pioggia: ogni corsista ha una assenza per pioggia da recuperare. Su questa lezione non si propongono recuperi.</div>`;
+  const rainCtl = rainControl(cid, date, hour); if(rainCtl) rainHost.appendChild(rainCtl);
 
   // recuperi già in programma per questa lezione
   const plannedHost = panel.querySelector('#recoPlanned');
@@ -2055,7 +2168,7 @@ function buildRecoveryPanel(cid, date, hour, courtId){
     else rows = all.filter(x=>x.sameLevel && x.owed>0);                // default: stesso livello con ore da recuperare
     rows.sort((a,b)=>
       ((skipped[a.fromCid+'|'+a.fromEid]?1:0) - (skipped[b.fromCid+'|'+b.fromEid]?1:0)) ||
-      ((b.sameLevel?1:0) - (a.sameLevel?1:0)) || (b.owed - a.owed) || a.name.localeCompare(b.name,'it'));
+      ((b.sameLevel?1:0) - (a.sameLevel?1:0)) || (b.rainOwed - a.rainOwed) || (b.owed - a.owed) || a.name.localeCompare(b.name,'it'));
     return rows;
   }
   function makeCandRow(cd, isFirst){
@@ -2064,7 +2177,7 @@ function buildRecoveryPanel(cid, date, hour, courtId){
     const phone = enrolleePhone(cd.e);
     const row = document.createElement('div');
     row.className = 'reco-row' + (isSkipped ? ' skipped' : '');
-    row.innerHTML = `<div class="pay-head" style="cursor:default;"><div style="min-width:0;"><div class="pay-name">${esc(cd.name)}${isFirst&&!isSkipped?' <span class="pill" style="padding:2px 7px;">prossimo consigliato</span>':''}</div><div class="hint">${esc(cd.c.name)} · livello ${esc(cd.level||cd.c.livello||'-')}${cd.sameLevel?'':' · <b>altro livello</b>'}${isSkipped?' · saltato':''}</div></div><span class="pill" style="${cd.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${cd.owed>0?cd.owed+(cd.owed===1?' ora':' ore')+' da recuperare':'nessuna ora da recuperare'}</span></div>`;
+    row.innerHTML = `<div class="pay-head" style="cursor:default;"><div style="min-width:0;"><div class="pay-name">${esc(cd.name)}${isFirst&&!isSkipped?' <span class="pill" style="padding:2px 7px;">prossimo consigliato</span>':''}</div><div class="hint">${esc(cd.c.name)} · livello ${esc(cd.level||cd.c.livello||'-')}${cd.sameLevel?'':' · <b>altro livello</b>'}${isSkipped?' · saltato':''}</div></div><span class="pill" style="${cd.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${cd.owed>0?cd.owed+(cd.owed===1?' ora':' ore')+' da recuperare'+(cd.rainOwed>0?' ('+cd.rainOwed+' pioggia)':''):'nessuna ora da recuperare'}</span></div>`;
     const acts = document.createElement('div'); acts.className = 'reco-actions';
     const wa = document.createElement('button'); wa.className = 'btn-ghost'; wa.style.cssText = 'flex:1;padding:8px 10px;font-size:12px;';
     wa.textContent = phone ? 'Invia messaggio' : 'Nessun numero';
@@ -2124,6 +2237,7 @@ function buildRecoveryPanel(cid, date, hour, courtId){
     if(!rowsAll.length) scroll.innerHTML = `<div class="hint" style="padding:10px 0;">${state.recoSearch.trim() ? 'Nessun corsista trovato.' : 'Nessun corsista con ore da recuperare.'}</div>`;
     else appendMore();
   };
+  if(rainOn){ rowsAll = []; scroll.innerHTML = `<div class="hint" style="padding:10px 0;">Nessuna proposta: la lezione è annullata per pioggia.</div>`; panel.querySelector('#recoSearch').disabled = true; }
   panel._restore = () => { if(state.recoScroll) scroll.scrollTop = state.recoScroll; };
   return panel;
 }
@@ -3077,6 +3191,7 @@ function renderCorsiScreen(host){
       const bl = enrolleeBacklog(cid, myEid2);
       statsHtml = `<div class="list-row"><span>Presenze</span><span class="pill">${presences}</span></div>
         <div class="list-row" style="flex-wrap:wrap;gap:4px 8px;"><span>Assenze</span><span class="pill" style="${bl.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${bl.absences} · recuperate ${bl.recovered} · da recuperare ${bl.owed}</span></div>
+        ${bl.rain>0 ? `<div class="list-row" style="flex-wrap:wrap;gap:4px 8px;"><span>Di cui per pioggia</span><span class="pill rain">${bl.rain} · da recuperare ${bl.rainOwed}</span></div>` : ''}
         <button class="btn-ghost" data-act="absHist" data-cid="${esc(cid)}" data-eid="${esc(myEid2)}" style="width:100%;margin:6px 0;">Vedi assenze e recuperi</button>`;
     }
     const billing = (state.myEnrollmentData[cid]||{}).billing;
@@ -3413,6 +3528,11 @@ function renderCorsiScreen(host){
         if(!enrollments.length){ attListHost.innerHTML = `<div class="hint">Nessun corsista iscritto.</div>`; }
         const realHours = courseHoursOn(c, state.attendanceDate).length > 0;
         const attDow = new Date(state.attendanceDate+'T00:00:00').getDay();
+        if(state.isAdmin && realHours){ // pioggia: annulla l'ora per tutti i corsisti (anche in anticipo o a lezione già passata)
+          const rh = document.createElement('div'); rh.style.marginTop = '8px';
+          attHours.forEach(h=>{ const rc = rainControl(cid, state.attendanceDate, h); if(rc) rh.appendChild(rc); });
+          attListHost.before(rh);
+        }
         enrollments.forEach(([eid,e])=>{
           const myHours = realHours ? attHours.filter(h=>enrolleeAttendsSession(e, attDow, h)) : attHours;
           if(!myHours.length) return; // non ha ore in questo giorno
@@ -3462,14 +3582,14 @@ function renderCorsiScreen(host){
         const stats = enrollments.map(([eid,e])=>{
           const presences = Math.max(0, lessonsHeld(course, e) - countAbsences(course, history, eid, e));
           const bl = enrolleeBacklog(cid, eid);
-          return { eid, e, absences: bl.absences, recovered: bl.recovered, owed: bl.owed, presences };
-        }).sort((a,b)=>b.owed-a.owed || b.absences-a.absences);
+          return { eid, e, absences: bl.absences, recovered: bl.recovered, owed: bl.owed, rain: bl.rain, rainOwed: bl.rainOwed, presences };
+        }).sort((a,b)=>b.rainOwed-a.rainOwed || b.owed-a.owed || b.absences-a.absences);
 
         const box = document.createElement('div');
         box.style.marginTop = '12px'; box.style.borderTop='1px solid var(--line)'; box.style.paddingTop='12px';
         box.innerHTML = `
           <div class="section-title">Assenze — ${course.name} (${course.livello||''})</div>
-          <div class="hint" style="margin-bottom:8px;">Ordinati per ore ancora da recuperare (assenze meno recuperi confermati dal maestro). Per invitare un corsista al recupero usa la scheda Maestro → Presenze e recuperi. Tocca un nome per vedere le lezioni saltate e i recuperi.</div>
+          <div class="hint" style="margin-bottom:8px;">Ordinati per ore ancora da recuperare, prima chi ha assenze per pioggia (assenze meno recuperi confermati dal maestro). Per invitare un corsista al recupero usa la scheda Maestro → Presenze e recuperi. Tocca un nome per vedere le lezioni saltate e i recuperi.</div>
           <div id="absenceList-${cid}"></div>
         `;
         detailHost.appendChild(box);
@@ -3477,7 +3597,7 @@ function renderCorsiScreen(host){
         if(!stats.length){ listHost.innerHTML = `<div class="hint">Nessun dato di presenza ancora registrato.</div>`; }
         stats.forEach(st=>{
           const row = document.createElement('div'); row.className='list-row'; row.style.flexWrap='wrap'; row.style.gap='4px 8px';
-          row.innerHTML = `<button type="button" class="name-link">${esc(st.e.name)}</button><span class="pill" style="${st.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${st.absences} assenze · ${st.recovered} recuperate · ${st.presences} presenze</span>`;
+          row.innerHTML = `<button type="button" class="name-link">${esc(st.e.name)}</button><span class="pill" style="${st.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${st.absences} assenze${st.rain?' ('+st.rain+' pioggia)':''} · ${st.recovered} recuperate · ${st.presences} presenze</span>`;
           row.querySelector('.name-link').onclick = () => showAbsenceHistory(cid, st.eid);
           listHost.appendChild(row);
         });
@@ -3688,8 +3808,10 @@ function renderMaestroScreen(host){
     const abs = enr.filter(([eid])=>attGet(dayAtt[eid], s.hour)===false).length;
     const pres = enr.length - abs; // chi non ha segnato l'assenza è presente di default
     const guests = lessonRecoveries(s.cid, s.dateStr, s.hour, s.courtId);
+    const rainOn = enr.some(([eid])=>attRain(dayAtt[eid], s.hour));
 
     const chips = [];
+    if(rainOn) chips.push(`<span class="mt-chip rain">annullata per pioggia</span>`);
     if(!enr.length) chips.push(`<span class="mt-chip">nessun iscritto</span>`);
     if(pres) chips.push(`<span class="mt-chip ok">${pres} ${pres===1?'presente':'presenti'}</span>`);
     if(abs) chips.push(`<span class="mt-chip no">${abs} ${abs===1?'assente':'assenti'}</span>`);
