@@ -1490,20 +1490,40 @@ function attRainCount(raw){ // ore di assenza per pioggia in quel giorno
   if(!(raw && typeof raw==='object')) return 0;
   return Object.keys(raw).filter(k=>/^r\d+$/.test(k) && raw[k] && raw['h'+k.slice(1)]===false).length;
 }
-function lessonRainOn(cid, date, hour){ // ora annullata per pioggia: almeno un iscritto di quell'ora ha l'etichetta
-  const day = ((state.courseAttendanceByCourse[cid]||{})[date]) || state.courseAttendance[cid+'|'+date] || {};
-  return Object.values(day).some(v=>attRain(v, hour));
+function rainDayMap(cid, date){ return ((state.courseAttendanceByCourse[cid]||{})[date]) || state.courseAttendance[cid+'|'+date] || {}; }
+function courtsAt(course, dow, hour){ // campi del corso a quell'ora (se sono 2 o più, la pioggia si segna per campo)
+  return [...new Set(getCourseSessions(course).filter(x=>x.weekday===dow && x.hour===hour).map(x=>x.courtId).filter(Boolean))];
 }
-async function setRainHour(cid, date, hour, on){
+function lessonRainOn(cid, date, hour, courtId){ // ora (e campo) annullata per pioggia: almeno un iscritto di quell'ora/campo ha l'etichetta
+  const enrs = state.courseEnrollments[cid];
+  const dow = new Date(date+'T00:00:00').getDay();
+  return Object.entries(rainDayMap(cid, date)).some(([eid,v])=>{
+    if(!attRain(v, hour)) return false;
+    const e = enrs ? enrs[eid] : undefined;
+    return !(courtId && e && !enrolleeAttendsSession(e, dow, hour, courtId));
+  });
+}
+/* courtId: se il corso ha due o più campi a quell'ora, annulla solo i corsisti di quel campo (omesso = tutti i campi).
+   Chi non ha un campo assegnato non si sa su quale giocherebbe: con la pioggia su un solo campo non viene toccato (si conta in "skipped"). */
+async function setRainHour(cid, date, hour, on, courtId){
   const course = state.courses[cid] || {};
   const dow = new Date(date+'T00:00:00').getDay();
+  const court = courtsAt(course, dow, hour).length > 1 ? courtId : undefined;
   const dayRef = ref(db, cpath('courseAttendance/'+cid+'/'+date));
   const [enrSnap, attSnap] = await Promise.all([ get(ref(db, cpath('courseEnrollments/'+cid))), get(dayRef) ]);
   const enr = enrSnap.val() || {}, att = attSnap.val() || {};
-  const upd = {}; let n = 0;
+  const upd = {}; let n = 0, skipped = 0;
   Object.entries(enr).forEach(([eid, e])=>{
-    if(!e || !enrolleeAttendsSession(e, dow, hour)) return;
+    if(!e) return;
     const raw = att[eid];
+    if(court){
+      const explicit = !!(e.sessions && e.sessions[sessionKey(dow, hour, court)]);
+      if(!explicit){
+        const tagged = !!(raw && typeof raw==='object' && raw['r'+hour]);
+        if(enrolleeAttendsSession(e, dow, hour, court) && (on || tagged)) skipped++; // campo non assegnato
+        return;
+      }
+    } else if(!enrolleeAttendsSession(e, dow, hour)) return;
     if(raw===true || raw===false){ // dato vecchio per tutto il giorno: lo scompongo per ora
       if(!on) return; // senza etichetta pioggia non c'è nulla da ripristinare
       const obj = {}; courseHoursOn(course, date).forEach(h=>{ obj['h'+h] = raw; });
@@ -1525,50 +1545,62 @@ async function setRainHour(cid, date, hour, on){
   });
   if(Object.keys(upd).length) await update(dayRef, upd);
   if(on){ // i recuperi solo proposti a questa lezione decadono (quelli già confermati restano)
-    for(const pr of lessonRecoveries(cid, date, hour).filter(x=>x.rec.status==='proposed')) await removeRecovery(pr);
+    for(const pr of lessonRecoveries(cid, date, hour, court).filter(x=>x.rec.status==='proposed')) await removeRecovery(pr);
   }
-  return n;
+  return { n, skipped };
 }
-async function setRainAllCourses(date, hour, on){
-  let n = 0, courses = 0;
+async function setRainAllCourses(date, hour, on, courtId){
+  const dow = new Date(date+'T00:00:00').getDay();
+  let n = 0, courses = 0, skipped = 0;
   for(const [cid, c] of Object.entries(state.courses||{})){
     if(!courseHoursOn(c, date).includes(hour)) continue;
-    n += await setRainHour(cid, date, hour, on); courses++;
+    if(courtId && !courtsAt(c, dow, hour).includes(courtId)) continue; // quel corso a quell'ora non gioca su quel campo
+    const r = await setRainHour(cid, date, hour, on, courtId);
+    n += r.n; skipped += r.skipped; courses++;
   }
-  return { n, courses };
+  return { n, courses, skipped };
 }
-function rainControl(cid, date, hour){ // solo admin: annulla/ripristina l'ora per tutti i corsisti
+function rainControl(cid, date, hour, courtId){ // solo admin: annulla/ripristina l'ora (o un solo campo) per i corsisti
   if(!state.isAdmin) return null;
-  const active = lessonRainOn(cid, date, hour);
+  const course = state.courses[cid] || {};
+  const dow = new Date(date+'T00:00:00').getDay();
+  const multi = courtsAt(course, dow, hour).length > 1;
+  const court = multi ? courtId : undefined;
+  const day = rainDayMap(cid, date);
+  const attendees = Object.entries(state.courseEnrollments[cid]||{}).filter(([_,e])=>enrolleeAttendsSession(e, dow, hour, court));
+  const tagged = attendees.filter(([eid])=>attRain(day[eid], hour)).length;
+  const active = (multi && !court) ? (attendees.length>0 && tagged===attendees.length) : tagged>0; // "tutti i campi": attiva solo se lo sono tutti
   const hh2 = String(hour).padStart(2,'0')+':00';
-  const when = WEEKDAY_FULL[new Date(date+'T00:00:00').getDay()]+' '+fmtDateDisplay(date)+' alle '+hh2;
-  const cname = (state.courses[cid]||{}).name || '';
+  const where = court ? ' sul campo '+courtNameOf(court) : '';
+  const when = WEEKDAY_FULL[dow]+' '+fmtDateDisplay(date)+' alle '+hh2;
+  const cname = course.name || '';
   const wrap = document.createElement('div');
   wrap.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;margin:6px 0;';
   const lab = document.createElement('span'); lab.className = 'pill' + (active ? ' rain' : '');
-  lab.textContent = hh2 + ' · ' + (active ? 'annullata per pioggia' : 'pioggia');
+  lab.textContent = hh2 + (court ? ' · '+courtNameOf(court) : (multi ? ' · tutti i campi' : '')) + ' · ' + (active ? 'annullata per pioggia' : 'pioggia');
   wrap.appendChild(lab);
   const mk = (txt, fn) => {
     const b = document.createElement('button'); b.type = 'button'; b.className = 'small-btn'; b.textContent = txt;
     b.onclick = async () => { b.disabled = true; try{ await fn(); }catch(err){ toast('Errore: '+err.message); } b.disabled = false; };
     wrap.appendChild(b);
   };
-  mk(active ? 'Ripristina ora' : 'Annulla per pioggia', async () => {
+  const skipTxt = k => k>0 ? ' · '+k+(k===1?' corsista senza campo assegnato non toccato':' corsisti senza campo assegnato non toccati')+': segnali singolarmente' : '';
+  mk(active ? 'Ripristina' : 'Annulla per pioggia', async () => {
     const msg = active
-      ? 'Ripristinare la lezione di '+cname+' di '+when+'?\nLe assenze per pioggia di quest\'ora vengono tolte (chi si era segnato assente da solo resta assente).'
-      : 'Annullare per pioggia la lezione di '+cname+' di '+when+' per tutti i corsisti?\nOgnuno avrà UNA assenza per pioggia (anche chi si era già segnato assente), da recuperare con priorità. I recuperi solo proposti a questa lezione vengono tolti.';
+      ? 'Ripristinare la lezione di '+cname+' di '+when+where+'?\nLe assenze per pioggia vengono tolte (chi si era segnato assente da solo resta assente).'
+      : 'Annullare per pioggia la lezione di '+cname+' di '+when+where+(multi && !court ? ' (tutti i campi)' : '')+'?\nOgni corsista coinvolto avrà UNA assenza per pioggia (anche chi si era già segnato assente), da recuperare con priorità. I recuperi solo proposti a questa lezione vengono tolti.';
     if(!confirm(msg)) return;
-    const n = await setRainHour(cid, date, hour, !active);
-    toast(active ? 'Ora ripristinata ('+n+' corsisti)' : 'Ora annullata per pioggia ('+n+' corsisti)');
+    const r = await setRainHour(cid, date, hour, !active, court);
+    toast((active ? 'Ripristinata ('+r.n+' corsisti)' : 'Annullata per pioggia ('+r.n+' corsisti)')+skipTxt(r.skipped));
   });
-  const sameHour = Object.values(state.courses||{}).filter(c=>courseHoursOn(c, date).includes(hour)).length;
-  if(sameHour > 1) mk(active ? 'Ripristina tutti i corsi' : 'Pioggia su tutti i corsi', async () => {
+  const sameHour = Object.values(state.courses||{}).filter(c=>courseHoursOn(c, date).includes(hour) && (!court || courtsAt(c, dow, hour).includes(court))).length;
+  if(sameHour > 1) mk((active ? 'Ripristina ' : 'Pioggia ')+(court ? 'su '+courtNameOf(court)+' in ' : 'su ')+'tutti i corsi', async () => {
     const msg = active
-      ? 'Ripristinare le '+hh2+' di '+fmtDateDisplay(date)+' in tutti i '+sameHour+' corsi?'
-      : 'Annullare per pioggia le '+hh2+' di '+fmtDateDisplay(date)+' in tutti i '+sameHour+' corsi, per tutti i corsisti?\nOgnuno avrà UNA assenza per pioggia da recuperare con priorità.';
+      ? 'Ripristinare le '+hh2+' di '+fmtDateDisplay(date)+(court ? ' sul campo '+courtNameOf(court) : '')+' in tutti i '+sameHour+' corsi?'
+      : 'Annullare per pioggia le '+hh2+' di '+fmtDateDisplay(date)+(court ? ' sul campo '+courtNameOf(court) : '')+' in tutti i '+sameHour+' corsi?\nOgni corsista coinvolto avrà UNA assenza per pioggia da recuperare con priorità.';
     if(!confirm(msg)) return;
-    const r = await setRainAllCourses(date, hour, !active);
-    toast((active ? 'Ripristinate' : 'Annullate per pioggia')+': '+r.courses+' corsi, '+r.n+' corsisti');
+    const r = await setRainAllCourses(date, hour, !active, court);
+    toast((active ? 'Ripristinate' : 'Annullate per pioggia')+': '+r.courses+' corsi, '+r.n+' corsisti'+skipTxt(r.skipped));
   });
   return wrap;
 }
@@ -1961,7 +1993,7 @@ function lessonHoles(cid, date, hour, courtId){
     free = Math.max(0, (Number(c.maxSeats)||0) - attending);
   } else free = freeSeatsAt(c, dow, hour, courtId);
   const taken = lessonRecoveries(cid, date, hour, courtId).filter(x=>x.rec.status==='proposed' || x.rec.status==='present').length;
-  const rainOn = hour!==undefined && Object.values(day).some(v=>attRain(v, hour));
+  const rainOn = hour!==undefined && lessonRainOn(cid, date, hour, courtId);
   return { absent, free, taken, holes: rainOn ? 0 : Math.max(0, absent + free - taken), rain: rainOn }; // ora annullata per pioggia: nessun posto da riempire
 }
 function enrolleePhone(e){
@@ -2115,10 +2147,10 @@ function buildRecoveryPanel(cid, date, hour, courtId){
   });
 
   // pioggia: avviso per tutti, controllo per l'admin
-  const rainOn = lessonRainOn(cid, date, hour);
+  const rainOn = lessonRainOn(cid, date, hour, courtId);
   const rainHost = panel.querySelector('#recoRain');
   if(rainOn) rainHost.innerHTML = `<div class="hint" style="color:var(--ball-text);margin-bottom:6px;">Lezione annullata per pioggia: ogni corsista ha una assenza per pioggia da recuperare. Su questa lezione non si propongono recuperi.</div>`;
-  const rainCtl = rainControl(cid, date, hour); if(rainCtl) rainHost.appendChild(rainCtl);
+  const rainCtl = rainControl(cid, date, hour, courtId); if(rainCtl) rainHost.appendChild(rainCtl);
 
   // recuperi già in programma per questa lezione
   const plannedHost = panel.querySelector('#recoPlanned');
@@ -3530,7 +3562,10 @@ function renderCorsiScreen(host){
         const attDow = new Date(state.attendanceDate+'T00:00:00').getDay();
         if(state.isAdmin && realHours){ // pioggia: annulla l'ora per tutti i corsisti (anche in anticipo o a lezione già passata)
           const rh = document.createElement('div'); rh.style.marginTop = '8px';
-          attHours.forEach(h=>{ const rc = rainControl(cid, state.attendanceDate, h); if(rc) rh.appendChild(rc); });
+          attHours.forEach(h=>{
+            const cs = courtsAt(c, attDow, h); // due campi alla stessa ora: un controllo per campo + uno per tutti i campi
+            (cs.length>1 ? [...cs, undefined] : [undefined]).forEach(ct=>{ const rc = rainControl(cid, state.attendanceDate, h, ct); if(rc) rh.appendChild(rc); });
+          });
           attListHost.before(rh);
         }
         enrollments.forEach(([eid,e])=>{
