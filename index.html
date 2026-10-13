@@ -189,12 +189,18 @@
   .small-btn.on-due{border-color:var(--danger);color:var(--danger);}
   .small-btn.on-paid{background:var(--ok);border-color:var(--ok-border);color:#17270A;}
   .small-btn.on-exempt{border-color:var(--ok-border);color:var(--ok-text);}
-  .reco-panel{margin:8px 0 12px;padding:12px;border:1px solid var(--ball-dim);border-radius:10px;background:var(--tile);}
-  .reco-scroll{max-height:52vh;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:0 10px;}
+  .reco-panel{position:fixed;inset:0;z-index:70;overflow-y:auto;overscroll-behavior:contain;background:var(--board);padding-bottom:48px;}
+  .reco-bar{position:sticky;top:0;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:10px;max-width:520px;margin:0 auto;box-sizing:border-box;padding:10px 14px;background:var(--navy);border-bottom:1px solid var(--line);}
+  .reco-inner{max-width:520px;margin:0 auto;padding:0 14px;box-sizing:border-box;}
+  .reco-scroll{border:1px solid var(--line);border-radius:8px;padding:0 10px;}
   .reco-row{padding:10px 0;border-bottom:1px solid var(--line);}
   .reco-row:last-child{border-bottom:none;}
   .reco-row.skipped{opacity:.55;}
-  .reco-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;}
+  .reco-row .pay-head{display:block;}
+  .reco-row .pay-head .pill{display:inline-block;margin-top:6px;white-space:normal;}
+  .reco-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-top:8px;}
+  .reco-actions .reco-wa{grid-column:1/-1;}
+  .reco-actions .small-btn{padding:10px 4px;}
   .course-actions{display:grid;gap:8px;margin-top:10px;}
   .course-actions button{width:100%;min-width:0;padding:10px 6px;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
   .cal-att{margin:2px 0 8px;font-size:13px;color:var(--ink-dim);display:flex;flex-direction:column;gap:5px;}
@@ -2006,12 +2012,35 @@ function recoveryCandidates(toCid, date, hour, courtId){
   const lvl = normTxt(target.livello||'').trim();
   const already = new Set(lessonRecoveries(toCid, date).map(x=>x.fromCid+'|'+x.fromEid));
   const dow = new Date(date+'T00:00:00').getDay();
+  // Chi a quest'ora è già impegnato non si propone: lezione propria (qualsiasi corso o campo, pioggia esclusa) o altro recupero già fissato.
+  // La stessa persona iscritta a più corsi si riconosce da account collegato (uid) o numero di telefono.
+  const personKey = e => !e ? '' : (e.uid ? 'u:'+e.uid : (enrolleePhone(e) ? 'p:'+normalizePhone(enrolleePhone(e)) : ''));
+  const busyEnr = new Set(), busyPeople = new Set();
+  const markBusy = (cid3, eid3, e3) => { busyEnr.add(cid3+'|'+eid3); const k = personKey(e3); if(k) busyPeople.add(k); };
+  if(hour!=null){
+    Object.entries(state.courses||{}).forEach(([cid3, c3])=>{
+      if(!courseHoursOn(c3, date).includes(hour)) return;
+      const dayAtt = (state.courseAttendanceByCourse[cid3]||{})[date] || {};
+      Object.entries(state.courseEnrollments[cid3]||{}).forEach(([eid3, e3])=>{
+        if(!e3 || !enrolleeAttendsSession(e3, dow, hour)) return;
+        if(attRain(dayAtt[eid3], hour)) return; // la sua ora è annullata per pioggia: è libero
+        markBusy(cid3, eid3, e3);
+      });
+    });
+    Object.entries(state.courseRecoveries||{}).forEach(([fc, byEid])=>{
+      Object.entries(byEid||{}).forEach(([fe, recs])=>{
+        Object.values(recs||{}).forEach(r=>{
+          if(r && r.toDate===date && r.toHour===hour && (r.status==='proposed' || r.status==='present')) markBusy(fc, fe, (state.courseEnrollments[fc]||{})[fe]);
+        });
+      });
+    });
+  }
   const out = [];
   Object.entries(state.courses||{}).forEach(([cid2, c2])=>{
     Object.entries(state.courseEnrollments[cid2]||{}).forEach(([eid, e])=>{
       if(already.has(cid2+'|'+eid)) return;
-      // stesso corso (es. macrocorso): proponibile solo se NON ha già lezione in quest'ora/campo
-      if(cid2===toCid && (hour==null || enrolleeAttendsSession(e, dow, hour, courtId))) return;
+      if(busyEnr.has(cid2+'|'+eid)) return;
+      const pk = personKey(e); if(pk && busyPeople.has(pk)) return;
       const bl = enrolleeBacklog(cid2, eid);
       const elv = enrolleeLevel(c2, e);
       out.push({ fromCid:cid2, fromEid:eid, e, c:c2, owed:bl.owed, rain:bl.rain, rainOwed:bl.rainOwed, level: elv, sameLevel: normTxt(elv).trim()===lvl, name:e.name||'—' });
@@ -2121,7 +2150,8 @@ function buildRecoveryPanel(cid, date, hour, courtId){
   const panel = document.createElement('div');
   panel.className = 'reco-panel';
   panel.innerHTML = `
-    <div class="section-title">${esc(course.name)} · ${WEEKDAY_FULL[dow]} ${fmtDateDisplay(date)} · ${String(hour).padStart(2,'0')}:00${courtId && courtNameOf(courtId) ? ' · '+esc(courtNameOf(courtId)) : ''}</div>
+    <div class="reco-bar"><div style="min-width:0;"><div class="pay-name">${esc(course.name)}</div><div class="hint">${WEEKDAY_FULL[dow]} ${fmtDateDisplay(date)} · ${String(hour).padStart(2,'0')}:00${courtId && courtNameOf(courtId) ? ' · '+esc(courtNameOf(courtId)) : ''}</div></div><button type="button" class="btn-ghost" id="recoClose" style="padding:8px 14px;font-size:12px;">Chiudi</button></div>
+    <div class="reco-inner" style="padding-top:12px;">
     <div class="hint" style="margin-bottom:8px;">Posti da riempire: <b style="color:var(--chalk);">${hl.holes}</b> (assenti ${hl.absent}, posti liberi ${hl.free}, già coperti da recuperi ${hl.taken})</div>
     <div id="recoRain"></div>
     <div class="section-title" style="margin-top:8px;">Presenze della lezione</div>
@@ -2129,10 +2159,11 @@ function buildRecoveryPanel(cid, date, hour, courtId){
     <div class="section-title" style="margin-top:14px;">Recuperi in programma</div>
     <div id="recoPlanned"></div>
     <div class="section-title" style="margin-top:14px;">Proposte per riempire i buchi</div>
-    <div class="hint" style="margin-bottom:6px;">Di default: corsisti di altri corsi dello stesso livello (${esc(course.livello||'-')}) con ore da recuperare, prima chi ne ha di più. Puoi cercare anche altri livelli.</div>
+    <div class="hint" style="margin-bottom:6px;">Di default: corsisti dello stesso livello (${esc(course.livello||'-')}) con ore da recuperare, anche dello stesso macrocorso, prima chi ne ha di più. Non compare chi a quest'ora ha già lezione o un altro recupero. Puoi cercare anche altri livelli.</div>
     <div class="seg" id="recoLevel" style="margin-bottom:8px;"></div>
-    <div class="field"><input id="recoSearch" type="text" placeholder="Cerca un corsista di un altro corso…" autocomplete="off" value="${esc(state.recoSearch)}"></div>
-    <div class="reco-scroll" id="recoScroll"></div>`;
+    <div class="field"><input id="recoSearch" type="text" placeholder="Cerca un corsista…" autocomplete="off" value="${esc(state.recoSearch)}"></div>
+    <div class="reco-scroll" id="recoScroll"></div>
+    </div>`;
 
   // presenze della lezione (il maestro può sempre segnare o cambiare)
   const attHost = panel.querySelector('#recoAtt');
@@ -2211,7 +2242,7 @@ function buildRecoveryPanel(cid, date, hour, courtId){
     row.className = 'reco-row' + (isSkipped ? ' skipped' : '');
     row.innerHTML = `<div class="pay-head" style="cursor:default;"><div style="min-width:0;"><div class="pay-name">${esc(cd.name)}${isFirst&&!isSkipped?' <span class="pill" style="padding:2px 7px;">prossimo consigliato</span>':''}</div><div class="hint">${esc(cd.c.name)} · livello ${esc(cd.level||cd.c.livello||'-')}${cd.sameLevel?'':' · <b>altro livello</b>'}${isSkipped?' · saltato':''}</div></div><span class="pill" style="${cd.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${cd.owed>0?cd.owed+(cd.owed===1?' ora':' ore')+' da recuperare'+(cd.rainOwed>0?' ('+cd.rainOwed+' pioggia)':''):'nessuna ora da recuperare'}</span></div>`;
     const acts = document.createElement('div'); acts.className = 'reco-actions';
-    const wa = document.createElement('button'); wa.className = 'btn-ghost'; wa.style.cssText = 'flex:1;padding:8px 10px;font-size:12px;';
+    const wa = document.createElement('button'); wa.className = 'btn-ghost reco-wa'; wa.style.cssText = 'padding:10px;font-size:12px;';
     wa.textContent = phone ? 'Invia messaggio' : 'Nessun numero';
     wa.disabled = !phone;
     wa.onclick = () => {
@@ -2254,9 +2285,9 @@ function buildRecoveryPanel(cid, date, hour, courtId){
       const q = state.recoSearch.trim();
       scroll.innerHTML = `<div class="hint" style="padding:10px 0;">${q ? 'Nessun corsista trovato.' : 'Nessun corsista con ore da recuperare'+(state.recoAll?'':' in questo livello')+'. Prova "Tutti i livelli" o cerca un nome.'}</div>`;
     } else appendMore();
-    scroll.addEventListener('scroll', ()=>{
-      state.recoScroll = scroll.scrollTop;
-      if(rendered < rowsAll.length && scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 80){
+    panel.addEventListener('scroll', ()=>{ // una sola scroll: quella della schermata
+      state.recoScroll = panel.scrollTop;
+      if(rendered < rowsAll.length && panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 220){
         state.recoLimit += 15;
         appendMore();
       }
@@ -2270,7 +2301,8 @@ function buildRecoveryPanel(cid, date, hour, courtId){
     else appendMore();
   };
   if(rainOn){ rowsAll = []; scroll.innerHTML = `<div class="hint" style="padding:10px 0;">Nessuna proposta: la lezione è annullata per pioggia.</div>`; panel.querySelector('#recoSearch').disabled = true; }
-  panel._restore = () => { if(state.recoScroll) scroll.scrollTop = state.recoScroll; };
+  panel.querySelector('#recoClose').onclick = () => { state.recoverySession = null; state.recoScroll = 0; renderApp(); };
+  panel._restore = () => { if(state.recoScroll) panel.scrollTop = state.recoScroll; };
   return panel;
 }
 
