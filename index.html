@@ -896,6 +896,11 @@ function blockStatus(payMap, blk){
 const LEVELS_ALL = ['Principianti','Base','Intermedio','Avanzato','Agonisti'];
 /* Quota e livello personalizzati per iscritto: courseEnrollments/{cid}/{eid}/fee e /livello (se mancano valgono quelli del corso) */
 function enrolleeFee(c, e){ return (e && e.fee!=null && e.fee!=='' && !isNaN(Number(e.fee))) ? Number(e.fee) : (Number(c && c.monthlyFee)||0); }
+/* Quota che il corso paga al circolo per ogni ora di campo: campo "hourRate" del corso, altrimenti la tariffa SAT */
+function courseHourRate(c){
+  if(c && c.hourRate!=null && c.hourRate!=='' && !isNaN(Number(c.hourRate))) return Number(c.hourRate);
+  return Number(((state.club||{}).rates||{}).sat) || 0;
+}
 function enrolleeLevel(c, e){ return (e && e.livello) ? e.livello : ((c && c.livello) || ''); }
 function courseDueSummary(course, payMap, billing, e){
   const fee = enrolleeFee(course, e);
@@ -3125,8 +3130,8 @@ function renderCorsiScreen(host){
   const formOpen = state.isAdmin && (state.showCourseForm || !!state.editCourseId);
   const q = v => String(v==null?'':v).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
   const f = state.courseForm || (edCourse
-    ? { name:edCourse.name||'', livello:edCourse.livello||'Principianti', teacherUid:edCourse.teacherUid||'', teacherUid2:edCourse.teacherUid2||'', startDate:edCourse.startDate||todayKey(), endDate:edCourse.endDate||'', maxSeats:edCourse.maxSeats||8, monthlyFee:edCourse.monthlyFee||0 }
-    : { name:'', livello:'Principianti', teacherUid:'', teacherUid2:'', startDate:todayKey(), endDate:'', maxSeats:8, monthlyFee:40 });
+    ? { name:edCourse.name||'', livello:edCourse.livello||'Principianti', teacherUid:edCourse.teacherUid||'', teacherUid2:edCourse.teacherUid2||'', startDate:edCourse.startDate||todayKey(), endDate:edCourse.endDate||'', maxSeats:edCourse.maxSeats||8, monthlyFee:edCourse.monthlyFee||0, hourRate:(edCourse.hourRate!=null ? edCourse.hourRate : '') }
+    : { name:'', livello:'Principianti', teacherUid:'', teacherUid2:'', startDate:todayKey(), endDate:'', maxSeats:8, monthlyFee:40, hourRate:'' });
   const LEVELS = ['Principianti','Base','Intermedio','Avanzato','Agonisti'];
 
   const screen = document.createElement('div');
@@ -3162,6 +3167,7 @@ function renderCorsiScreen(host){
       <div class="field"><label>Data fine</label><input id="cEnd" type="date" value="${q(f.endDate)}"></div>
       <div class="field"><label>Posti massimi</label><input id="cMax" type="number" min="1" value="${q(f.maxSeats)}"></div>
       <div class="field"><label>Quota mensile (€)</label><input id="cFee" type="number" min="0" step="1" value="${q(f.monthlyFee)}"></div>
+      <div class="field"><label>Quota oraria che il corso paga al circolo (€/ora)</label><input id="cHourRate" type="number" min="0" step="0.5" inputmode="decimal" placeholder="vuoto = tariffa SAT (€ ${(Number(((state.club||{}).rates||{}).sat)||0)})" value="${q(f.hourRate)}"></div>
       <div class="btn-row" style="margin-top:8px;">
         <button class="btn-ghost" id="cancelCourseBtn">Annulla</button>
         <button class="btn-primary" id="createCourseBtn">${edCourse ? 'Salva modifiche' : 'Crea corso'}</button>
@@ -3184,7 +3190,7 @@ function renderCorsiScreen(host){
   function captureCourseForm(){
     if(!screen.querySelector('#cName')) return;
     const g = id => screen.querySelector(id).value;
-    state.courseForm = { name:g('#cName'), livello:g('#cLevel'), teacherUid:(state.pickers.teacher||{}).value||'', teacherUid2:(state.pickers.teacher2||{}).value||'', startDate:g('#cStart'), endDate:g('#cEnd'), maxSeats:g('#cMax'), monthlyFee:g('#cFee') };
+    state.courseForm = { name:g('#cName'), livello:g('#cLevel'), teacherUid:(state.pickers.teacher||{}).value||'', teacherUid2:(state.pickers.teacher2||{}).value||'', startDate:g('#cStart'), endDate:g('#cEnd'), maxSeats:g('#cMax'), monthlyFee:g('#cFee'), hourRate:g('#cHourRate') };
   }
   const formCard = screen.querySelector('#courseFormCard');
   if(formCard){ formCard.addEventListener('input', captureCourseForm); formCard.addEventListener('change', captureCourseForm); }
@@ -3693,6 +3699,8 @@ function renderCorsiScreen(host){
       const endDate = screen.querySelector('#cEnd').value;
       const maxSeats = parseInt(screen.querySelector('#cMax').value,10) || 8;
       const monthlyFee = parseFloat(screen.querySelector('#cFee').value) || 0;
+      const hourRateRaw = screen.querySelector('#cHourRate').value.trim();
+      const hourRate = hourRateRaw==='' ? null : Math.max(0, parseFloat(hourRateRaw)||0);
       const sessions = state.draftSessions.map(x=>({ weekday:x.weekday, hour:x.hour, courtId:x.courtId }));
       if(!name) return toast('Inserisci il nome del corso');
       if(!startDate || !endDate){ toast('Inserisci data inizio e fine'); return; }
@@ -3709,14 +3717,14 @@ function renderCorsiScreen(host){
           if(maxSeats < enrolled){ toast('I posti massimi non possono essere meno degli iscritti ('+enrolled+')'); return; }
           await update(ref(db, cpath('courses/'+state.editCourseId)), {
             name, livello, teacherUid: teacherUid||null, teacherName: teacherName||'', teacherUid2: teacherUid2||null, teacherName2: teacherName2||'',
-            sessions, startDate, endDate, maxSeats, monthlyFee
+            sessions, startDate, endDate, maxSeats, monthlyFee, hourRate
           });
           toast('Corso aggiornato');
         } else {
           const newRef = push(ref(db, cpath('courses')));
           await set(newRef, {
             name, livello, teacherUid: teacherUid||null, teacherName: teacherName||'', teacherUid2: teacherUid2||null, teacherName2: teacherName2||'',
-            sessions, startDate, endDate, maxSeats, monthlyFee,
+            sessions, startDate, endDate, maxSeats, monthlyFee, hourRate,
             enrolledCount: 0, createdAt: Date.now()
           });
           state.selectedCourseId = newRef.key;
@@ -4256,6 +4264,30 @@ function renderAdminScreen(host){
     byMode[mode].revenue += occ*rate; totRevenue += occ*rate;
   });
 
+  // Corsi del circolo: ore di campo occupate dalle sessioni nel periodo (escluse quelle annullate per pioggia) x quota oraria che il corso paga
+  const courseRows = []; let courseHours = 0, courseRevenue = 0;
+  Object.entries(state.courses||{}).forEach(([cid, c])=>{
+    loadCourseAttendanceAll(cid);
+    if(!c.startDate || !c.endDate) return;
+    const sess = getCourseSessions(c); if(!sess.length) return;
+    const rate = courseHourRate(c);
+    const first = new Date(Math.max(periodStart.getTime(), new Date(c.startDate+'T00:00:00').getTime()));
+    const last = new Date(Math.min(periodEnd.getTime(), new Date(c.endDate+'T23:59:59').getTime()));
+    let h = 0;
+    for(let d = new Date(first.getFullYear(), first.getMonth(), first.getDate()); d <= last; d.setDate(d.getDate()+1)){
+      const ds = dateKey(d), dow = d.getDay();
+      sess.forEach(x=>{
+        if(x.weekday!==dow) return;
+        const t = slotDateTime(ds, x.hour);
+        if(t < periodStart || t > periodEnd) return;
+        if(lessonRainOn(cid, ds, x.hour, x.courtId)) return; // lezione annullata per pioggia: non si conta
+        h++;
+      });
+    }
+    if(h>0){ courseRows.push({ name:c.name||'', hours:h, rate, revenue:h*rate }); courseHours += h; courseRevenue += h*rate; }
+  });
+  totHours += courseHours; totRevenue += courseRevenue;
+
   const dayBookings = allPrivate.filter(([_,b])=>b.date===state.selectedDate).sort((a,b)=>a[1].hour-b[1].hour);
   const byTeacherToday = {};
   dayBookings.forEach(([_,b])=>{
@@ -4561,10 +4593,17 @@ function renderAdminScreen(host){
     { label:'Lezioni maestro', d: byMode.lezione||{hours:0,revenue:0} },
     { label:'SAT (scuola tennis)', d: byMode.sat||{hours:0,revenue:0} },
     { label:'Corsi (altro maestro)', d: byMode.corsi||{hours:0,revenue:0} },
+    { label:'Corsi del circolo (ore campo)', d:{ hours:courseHours, revenue:courseRevenue } },
   ];
   contabilitaLines.forEach(line=>{
     const row = document.createElement('div'); row.className='list-row';
     row.innerHTML = `<span>${line.label}</span><span class="pill">${line.d.hours}h · € ${line.d.revenue.toFixed(2)}</span>`;
+    modeBreakdown.appendChild(row);
+  });
+  courseRows.forEach(r=>{ // dettaglio per corso: ore x quota oraria
+    const row = document.createElement('div'); row.className = 'hint';
+    row.style.cssText = 'display:flex;justify-content:space-between;gap:8px;margin:2px 0 2px 10px;';
+    row.innerHTML = `<span>${esc(r.name)}</span><span>${r.hours}h × € ${r.rate.toFixed(2)} = € ${r.revenue.toFixed(2)}</span>`;
     modeBreakdown.appendChild(row);
   });
 
