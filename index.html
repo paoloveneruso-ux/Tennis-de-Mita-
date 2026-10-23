@@ -600,6 +600,7 @@ const state = {
   isTeacher: false,
   members: {},
   bookingsPublic: {},
+  halfShifts: {},        // ore spostate alla mezz'ora (eccezione dell'admin)
   bookingsPrivate: {},   // popolato solo se admin
   cancellationStats: {}, // popolato solo se admin
   myBookingIds: {},
@@ -2428,6 +2429,7 @@ function attachListeners(){
   onValue(ref(db, cpath('members')), s=>{ state.members = s.val()||{}; determineMe(); renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('bookingsPublic')), s=>{ state.bookingsPublic = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('blocks')), s=>{ state.blocks = s.val()||{}; renderCurrent(); }, showFatalError);
+  onValue(ref(db, cpath('halfShifts')), s=>{ state.halfShifts = s.val()||{}; renderCurrent(); }, err=>console.error('halfShifts', err)); // se le regole non lo permettono l'app funziona come prima
   onValue(ref(db, cpath('myBookings/'+state.uid)), s=>{ state.myBookingIds = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('teachers')), s=>{ state.teachers = s.val()||{}; state.isTeacher = !!state.teachers[state.uid]; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('myTeachingBookings/'+state.uid)), s=>{ state.myTeachingBookings = s.val()||{}; renderCurrent(); }, showFatalError);
@@ -2702,7 +2704,7 @@ async function bookSlot(court, hour, targetInfo){
         date: state.selectedDate, hour, mode: state.selectedMode
       });
     }
-    toast('Campo prenotato: '+String(hour).padStart(2,'0')+':00 · '+modeLabel(state.selectedMode)+(targetInfo.uid!==state.uid?' · '+targetInfo.memberName:''));
+    toast('Campo prenotato: '+(isHalfShifted(court.id, state.selectedDate, hour) ? slotRange(court.id, state.selectedDate, hour)+' (orario spostato)' : String(hour).padStart(2,'0')+':00')+' · '+modeLabel(state.selectedMode)+(targetInfo.uid!==state.uid?' · '+targetInfo.memberName:''));
   }catch(e){ toast('Errore nella prenotazione: '+e.message); }
 }
 
@@ -2720,6 +2722,136 @@ async function cancelBooking(bid, ownerUid, teacherUid, auditInfo){
     }
     toast('Prenotazione annullata');
   }catch(e){ toast('Errore: '+e.message); }
+}
+
+/* ================= Ore alla mezz'ora (eccezione decisa dall'admin) =================
+   halfShifts/{data}_{campo}_{ora} = { courtId, date, hour }: quell'ora su quel campo va da :30 a :30 dell'ora dopo
+   (es. 19:00-20:00 diventa 19:30-20:30). Nella griglia la vedono solo l'admin e il socio che ha prenotato quell'ora.
+   L'ora subito dopo una serie spostata ha la prima mezz'ora occupata: per i soci risulta chiusa. */
+function hmFmt(h, half){ return String(h).padStart(2,'0')+':'+(half?'30':'00'); }
+function minFmt(m){ return String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0'); }
+function shiftKey(date, courtId, hour){ return date+'_'+String(courtId).replace(/[.$#\[\]\/]/g,'-')+'_'+hour; }
+function isHalfShifted(courtId, date, hour){ return !!(state.halfShifts||{})[shiftKey(date, courtId, hour)]; }
+function slotRange(courtId, date, hour){ const sh = isHalfShifted(courtId, date, hour); return hmFmt(hour, sh)+'–'+hmFmt(hour+1, sh); }
+function slotAfterShiftRun(courtId, date, hour){
+  return hour>OPEN_HOUR && isHalfShifted(courtId, date, hour-1) && !isHalfShifted(courtId, date, hour);
+}
+function slotTakenAnyHere(courtId, date, hour){ // prenotazione, chiusura, corso o prenotazione fissa
+  return Object.values(state.bookingsPublic||{}).some(b=>b.courtId===courtId && b.date===date && b.hour===hour)
+    || Object.values(state.blocks||{}).some(b=>b.courtId===courtId && b.date===date && b.hour===hour)
+    || Object.values(state.courses||{}).some(c=>courseCoversSlot(c, courtId, date, hour))
+    || Object.values(state.recurringBookings||{}).some(r=>recurringCoversSlot(r, courtId, date, hour));
+}
+function halfShiftRuns(courtId, date){ // serie di ore consecutive spostate: [{from,to}]
+  const runs = [];
+  for(let h=OPEN_HOUR; h<CLOSE_HOUR; h++){
+    if(!isHalfShifted(courtId, date, h)) continue;
+    const last = runs[runs.length-1];
+    if(last && last.to===h-1) last.to = h; else runs.push({ from:h, to:h });
+  }
+  return runs;
+}
+async function applyHalfShift(courtId, date, from, count){
+  const court = (state.club.courts||[]).find(c=>c.id===courtId) || { name:courtId };
+  const hours = Array.from({length:count}, (_,i)=>from+i);
+  const lastH = hours[hours.length-1];
+  if(lastH >= CLOSE_HOUR){ toast('Le ore devono restare entro la chiusura ('+hmFmt(CLOSE_HOUR)+')'); return false; }
+  if(slotDateTime(date, from) <= new Date()){ toast('Si possono spostare solo ore future'); return false; }
+  const bad = hours.find(h=>
+    Object.values(state.blocks||{}).some(b=>b.courtId===courtId && b.date===date && b.hour===h)
+    || Object.values(state.courses||{}).some(c=>courseCoversSlot(c, courtId, date, h))
+    || Object.values(state.recurringBookings||{}).some(r=>recurringCoversSlot(r, courtId, date, h)));
+  if(bad!==undefined){ toast('Le '+hmFmt(bad)+' sono chiuse, di un corso o fisse: non si spostano da qui'); return false; }
+  // l'ora subito dopo la serie (compresa quella già spostata) perde la prima mezz'ora: deve essere libera
+  const all = new Set(hours); for(let h=OPEN_HOUR; h<CLOSE_HOUR; h++) if(isHalfShifted(courtId, date, h)) all.add(h);
+  let end = lastH; while(all.has(end+1)) end++;
+  const next = end+1;
+  if(next < CLOSE_HOUR && slotTakenAnyHere(courtId, date, next)){
+    toast('Le '+hmFmt(next)+' sono occupate: la serie finirebbe alle '+hmFmt(end+1,true)+'. Liberale o includile nello spostamento.'); return false;
+  }
+  const upd = {}; hours.forEach(h=>{ upd[shiftKey(date, courtId, h)] = { courtId, date, hour:h, createdAt:Date.now() }; });
+  await update(ref(db, cpath('halfShifts')), upd);
+  writeAuditLog({ type:'mezz_ora', forMemberName:count+(count===1?' ora spostata':' ore spostate')+' alla mezz\'ora', courtId, courtName:court.name, date, hour:from, mode:'' });
+  toast('Spostate alla mezz\'ora: '+hmFmt(from,true)+'–'+hmFmt(lastH+1,true)+' · '+court.name);
+  return true;
+}
+async function restoreHalfShiftRun(courtId, date, from, to){
+  const court = (state.club.courts||[]).find(c=>c.id===courtId) || { name:courtId };
+  const upd = {}; for(let h=from; h<=to; h++) upd[shiftKey(date, courtId, h)] = null;
+  await update(ref(db, cpath('halfShifts')), upd);
+  writeAuditLog({ type:'mezz_ora_ripristino', forMemberName:(to-from+1)+(to===from?' ora':' ore')+' tornate all\'ora esatta', courtId, courtName:court.name, date, hour:from, mode:'' });
+  toast('Orario ripristinato');
+}
+function renderShiftReminder(host){ // promemoria al socio: le sue prenotazioni future spostate alla mezz'ora
+  if(!host) return;
+  const now = new Date();
+  const items = Object.keys(state.myBookingIds||{}).map(bid=>state.bookingsPublic[bid])
+    .filter(b=>b && isHalfShifted(b.courtId, b.date, b.hour) && slotDateTime(b.date, b.hour+1) > now)
+    .sort((a,b)=>a.date.localeCompare(b.date) || String(a.courtId).localeCompare(String(b.courtId)) || a.hour-b.hour);
+  if(!items.length){ host.replaceChildren(); return; }
+  const groups = [];
+  items.forEach(b=>{
+    const g = groups[groups.length-1];
+    if(g && g.date===b.date && g.courtId===b.courtId && b.hour===g.to+1) g.to = b.hour;
+    else groups.push({ date:b.date, courtId:b.courtId, from:b.hour, to:b.hour });
+  });
+  const card = document.createElement('div'); card.className = 'card'; card.style.padding = '12px 14px';
+  card.innerHTML = `<div class="section-title" style="margin-bottom:6px;">Promemoria: orario spostato</div>`
+    + groups.map(g=>{
+      const cn = ((state.club.courts||[]).find(c=>c.id===g.courtId)||{}).name || g.courtId;
+      const d = new Date(g.date+'T00:00:00');
+      return `<div class="list-row" style="flex-wrap:wrap;gap:4px 8px;"><span>${WEEKDAY_FULL[d.getDay()].slice(0,3)} ${fmtDateDisplay(g.date)} · ${esc(cn)}</span><span class="pill rain">${hmFmt(g.from,true)}–${hmFmt(g.to+1,true)}</span></div>`;
+    }).join('')
+    + `<div class="hint" style="margin-top:6px;">La tua prenotazione parte alla mezz'ora, non all'ora esatta.</div>`;
+  host.replaceChildren(card);
+}
+function emptyHintEl(txt){ const e = document.createElement('div'); e.className = 'hint'; e.textContent = txt; return e; }
+function renderAdminDayPlan(host){ // solo admin: ore del giorno per campo, con ore consecutive unite e mezz'ore libere
+  if(!host) return;
+  const date = state.selectedDate;
+  const card = document.createElement('div'); card.className = 'card';
+  card.innerHTML = `<div class="section-title">Programma del giorno · ${WEEKDAY_FULL[new Date(date+'T00:00:00').getDay()]} ${fmtDateDisplay(date)}</div>
+    <div class="hint" style="margin-bottom:8px;">Solo admin. Le ore consecutive uguali sono unite; con le ore spostate alla mezz'ora compaiono le due mezz'ore libere a inizio e fine serie.</div>`;
+  (state.club.courts||[]).forEach(court=>{
+    const items = [];
+    for(let h=OPEN_HOUR; h<CLOSE_HOUR; h++){
+      const shifted = isHalfShifted(court.id, date, h);
+      const startMin = h*60 + (shifted?30:0);
+      const blockEntry = Object.entries(state.blocks||{}).find(([_,b])=>b.courtId===court.id && b.date===date && b.hour===h);
+      const courseEntry = Object.entries(state.courses||{}).find(([_,c])=>courseCoversSlot(c, court.id, date, h));
+      const recEntry = Object.entries(state.recurringBookings||{}).find(([_,r])=>recurringCoversSlot(r, court.id, date, h));
+      const bookEntry = Object.entries(state.bookingsPublic||{}).find(([_,b])=>b.courtId===court.id && b.date===date && b.hour===h);
+      let kind, label;
+      if(blockEntry){ kind = 'block'; label = 'Chiuso'; }
+      else if(courseEntry){ kind = 'course:'+courseEntry[0]; label = 'Corso · '+(courseEntry[1].name||''); }
+      else if(recEntry){ kind = 'rec:'+recEntry[0]; label = 'Fisso · '+(recEntry[1].memberName||''); }
+      else if(bookEntry){
+        const [bid, b] = bookEntry; const pv = (state.bookingsPrivate||{})[bid] || {};
+        kind = 'bk:'+(pv.memberName||'')+'|'+b.mode+'|'+(b.teacherName||'');
+        label = (pv.memberName||'Occupato')+' · '+modeLabel(b.mode)+(b.teacherName?' · '+b.teacherName:'');
+      } else continue;
+      items.push({ startMin, endMin:startMin+60, kind, label, shifted, hours:1 });
+    }
+    const rows = [];
+    items.forEach(it=>{ // unisce le ore consecutive uguali (stesso socio/corso/chiusura)
+      const last = rows[rows.length-1];
+      if(last && !last.gap && last.kind===it.kind && last.shifted===it.shifted && last.endMin===it.startMin){ last.endMin = it.endMin; last.hours++; }
+      else rows.push(Object.assign({}, it));
+    });
+    halfShiftRuns(court.id, date).forEach(run=>{ // le due mezz'ore libere (solo admin)
+      rows.push({ gap:true, startMin:run.from*60, endMin:run.from*60+30 });
+      if(run.to+1 < CLOSE_HOUR) rows.push({ gap:true, startMin:(run.to+1)*60+30, endMin:(run.to+2)*60 });
+    });
+    rows.sort((a,b)=>a.startMin-b.startMin);
+    const sec = document.createElement('div'); sec.style.marginTop = '10px';
+    sec.innerHTML = `<div class="pay-name" style="margin-bottom:4px;">${esc(court.name)}</div>`
+      + (rows.length ? rows.map(r=> r.gap
+        ? `<div class="list-row" style="opacity:.7;"><span>${minFmt(r.startMin)}–${minFmt(r.endMin)} · <span class="hint">mezz'ora libera</span></span><span class="pill">libera</span></div>`
+        : `<div class="list-row" style="flex-wrap:wrap;gap:4px 8px;"><div style="min-width:0;"><div><b>${minFmt(r.startMin)}–${minFmt(r.endMin)}</b></div><div class="hint">${esc(r.label)}</div></div><span class="pill${r.shifted?' rain':''}">${r.hours} ${r.hours===1?'ora':'ore'}${r.shifted?' · +30′':''}</span></div>`).join('')
+        : '<div class="hint">Nessuna ora occupata.</div>');
+    card.appendChild(sec);
+  });
+  host.replaceChildren(card);
 }
 
 /* ================= Vista Campi ================= */
@@ -2740,6 +2872,7 @@ function renderCourts(host){
       <div><div class="lbl">Ore giocate oggi</div></div>
       <div class="num">${myHoursToday}h</div>
     </div>
+    <div id="shiftReminderHost"></div>
     ${state.isAdmin ? `
     <div class="card" style="padding:12px 14px;">
       <div class="section-title" style="margin-bottom:8px;">Prenoti per</div>
@@ -2760,6 +2893,7 @@ function renderCourts(host){
     <div class="day-strip" id="dayStrip"></div>
     <div id="courtsHost"></div>
     <div id="loyaltyHost"></div>
+    <div id="adminDayHost"></div>
   `;
   host.replaceChildren(screen);
 
@@ -2797,6 +2931,8 @@ function renderCourts(host){
       const isPast = thisSlotTime <= now;
       const tooFarAhead = thisSlotTime > maxBookable;
       const label = String(h).padStart(2,'0')+':00';
+      const shiftedHere = isHalfShifted(court.id, state.selectedDate, h);
+      const afterRun = slotAfterShiftRun(court.id, state.selectedDate, h);
 
       const bookingEntry = Object.entries(state.bookingsPublic||{}).find(([_,b])=>
         b.courtId===court.id && b.date===state.selectedDate && b.hour===h
@@ -2828,16 +2964,18 @@ function renderCourts(host){
       } else if(bookingEntry){
         const [bid, b] = bookingEntry;
         const mine = !!state.myBookingIds[bid];
+        const showShift = shiftedHere && (mine || state.isAdmin); // l'orario spostato lo vedono solo l'admin e chi ha prenotato
         slotEl.className = 'slot ' + (mine ? 'mine' : 'taken') + (isPast?' past':'');
-        const modeTag = `<span class="mode-tag">${b.mode||''}${b.mode==='lezione'&&b.teacherName?' · '+b.teacherName:''}</span>`;
-        slotEl.innerHTML = `${label}<span class="who">${mine?'tu':'occupato'}</span>${modeTag}`;
+        const modeTag = `<span class="mode-tag">${b.mode||''}${b.mode==='lezione'&&b.teacherName?' · '+b.teacherName:''}${showShift?' · +30′':''}</span>`;
+        slotEl.innerHTML = `${showShift ? hmFmt(h,true) : label}<span class="who">${mine?'tu':'occupato'}</span>${modeTag}`;
+        if(showShift) slotEl.title = slotRange(court.id, state.selectedDate, h);
         if(mine && !isPast){
           const hoursUntil = (thisSlotTime - now)/3600000;
           const canCancel = hoursUntil >= MIN_CANCEL_HOURS;
           slotEl.style.cursor = canCancel ? 'pointer' : 'default';
           slotEl.onclick = () => {
             if(!canCancel){ toast("Non annullabile: mancano meno di 24h all'orario prenotato"); return; }
-            if(confirm('Annullare la prenotazione delle '+label+'?')){
+            if(confirm('Annullare la prenotazione delle '+(showShift ? hmFmt(h,true) : label)+'?')){
               cancelBooking(bid, state.uid, b.teacherUid, {
                 forMemberName: meObj.name, courtId: court.id, courtName: court.name,
                 date: b.date, hour: b.hour, mode: b.mode
@@ -2845,20 +2983,26 @@ function renderCourts(host){
             }
           };
         }
+      } else if(afterRun){ // prima mezz'ora occupata dall'ora precedente spostata: per i soci è chiuso, l'admin vede il perché
+        slotEl.className = 'slot blocked' + (isPast?' past':'');
+        slotEl.innerHTML = `${label}<span class="who">${state.isAdmin ? 'dalle '+hmFmt(h,true) : 'chiuso'}</span>`;
+        if(state.isAdmin) slotEl.title = hmFmt(h)+'–'+hmFmt(h,true)+' occupata dall\'ora precedente spostata; '+hmFmt(h,true)+'–'+hmFmt(h+1)+' libera';
       } else if(isPast){
         slotEl.className = 'slot past'; slotEl.textContent = label;
       } else if(tooFarAhead){
         slotEl.className = 'slot past'; slotEl.textContent = label;
         slotEl.title = 'Prenotabile da '+MAX_ADVANCE_DAYS+' giorni prima';
       } else {
-        slotEl.className = 'slot free'; slotEl.textContent = label;
+        slotEl.className = 'slot free';
+        if(shiftedHere && state.isAdmin){ slotEl.innerHTML = `${hmFmt(h,true)}<span class="mode-tag">+30′</span>`; slotEl.title = slotRange(court.id, state.selectedDate, h); }
+        else slotEl.textContent = label;
         slotEl.onclick = () => {
           const target = resolveBookingTarget(meObj);
           if(!target) return;
           if(state.selectedMode==='lezione'){
             openTeacherPickerAndBook(court, h, label, target);
           } else {
-            const confirmMsg = 'Confermi la prenotazione delle '+label+' su '+court.name+' ('+modeLabel(state.selectedMode)+(target.uid!==state.uid?' per '+target.memberName:'')+')?\n\nRicorda: non sarà annullabile nelle 24 ore precedenti l\'orario.';
+            const confirmMsg = 'Confermi la prenotazione delle '+label+' su '+court.name+' ('+modeLabel(state.selectedMode)+(target.uid!==state.uid?' per '+target.memberName:'')+')?\n\nRicorda: non sarà annullabile nelle 24 ore precedenti l\'orario.'+(shiftedHere ? '\n\nNota: quest\'ora è stata spostata dal circolo e andrà dalle '+hmFmt(h,true)+' alle '+hmFmt(h+1,true)+'.' : '');
             if(confirm(confirmMsg)) bookSlot(court, h, target);
           }
         };
@@ -2870,6 +3014,8 @@ function renderCourts(host){
   });
 
   renderLoyaltySection(screen.querySelector('#loyaltyHost'), meObj);
+  renderShiftReminder(screen.querySelector('#shiftReminderHost'));
+  if(state.isAdmin) renderAdminDayPlan(screen.querySelector('#adminDayHost'));
 }
 
 /* ================= Raccolta punti: progresso + conferma compagno ================= */
@@ -4013,7 +4159,7 @@ function renderSuperAdminScreen(host){
   if(clearBtn) clearBtn.onclick = () => { state.auditFrom=''; state.auditTo=''; renderApp(); };
 
   const listHost = screen.querySelector('#auditList');
-  const typeLabels = { cancellazione:'Cancellazione', prenotazione:'Prenotazione', modifica_quota:'Modifica quota' };
+  const typeLabels = { cancellazione:'Cancellazione', prenotazione:'Prenotazione', modifica_quota:'Modifica quota', mezz_ora:'Spostamento alla mezz\'ora', mezz_ora_ripristino:'Ripristino orario' };
   const typeColors = { cancellazione:'var(--danger)', modifica_quota:'var(--clay)' };
   filtered.forEach(([id,e])=>{
     const d = new Date(e.timestamp);
@@ -4372,6 +4518,23 @@ function renderAdminScreen(host){
     </div>
 
     <div class="card">
+      <div class="section-title">Ore alla mezz'ora (eccezione)</div>
+      <div class="hint" style="margin-bottom:8px;">Una o più ore consecutive su un campo partono alla mezz'ora (19:00–20:00 diventa 19:30–20:30). Nella griglia dei soci non si vede: lo vede solo chi ha prenotato quell'ora. L'ora subito dopo la serie non è più prenotabile e la mezz'ora prima e dopo restano libere (le vede solo l'admin).</div>
+      <div class="field"><label>Campo</label>
+        <select id="halfCourt">${(state.club.courts||[]).map(c=>`<option value="${c.id}">${c.name}</option>`).join('')}</select>
+      </div>
+      <div class="field"><label>Dalle ore</label>
+        <select id="halfHour">${Array.from({length:CLOSE_HOUR-OPEN_HOUR},(_,i)=>{const h=OPEN_HOUR+i;return `<option value="${h}">${String(h).padStart(2,'0')}:00</option>`;}).join('')}</select>
+      </div>
+      <div class="field"><label>Ore consecutive</label>
+        <select id="halfCount">${[1,2,3,4,5,6].map(n=>`<option value="${n}">${n}</option>`).join('')}</select>
+      </div>
+      <button class="btn-clay" id="halfBtn" style="width:100%;margin-top:8px;">Sposta alla mezz'ora per il ${fmtDateDisplay(state.selectedDate)}</button>
+      <div class="section-title" style="margin-top:14px;">Ore spostate (da oggi)</div>
+      <div id="halfList"></div>
+    </div>
+
+    <div class="card">
       <div class="section-title">Prenotazioni fisse (ricorrenti)</div>
       <div class="hint" style="margin-bottom:8px;">Si ripetono ogni settimana lo stesso giorno e ora. Solo l'admin può crearle o rimuoverle — pensate per accordi presi direttamente con la segreteria.</div>
       <div id="recurringList"></div>
@@ -4723,6 +4886,27 @@ function renderAdminScreen(host){
       toast('Slot bloccato');
     }catch(e){ toast('Errore: '+e.message); }
   };
+
+  screen.querySelector('#halfBtn').onclick = async () => {
+    const courtId = screen.querySelector('#halfCourt').value;
+    const from = parseInt(screen.querySelector('#halfHour').value,10);
+    const count = parseInt(screen.querySelector('#halfCount').value,10);
+    try{ await applyHalfShift(courtId, state.selectedDate, from, count); }catch(e){ toast('Errore: '+e.message); }
+  };
+  const halfList = screen.querySelector('#halfList');
+  const halfDates = [...new Set(Object.values(state.halfShifts||{}).map(x=>x && x.date).filter(d=>d && d>=todayKey()))].sort();
+  halfDates.forEach(d=>(state.club.courts||[]).forEach(court=>halfShiftRuns(court.id, d).forEach(run=>{
+    const row = document.createElement('div'); row.className = 'list-row'; row.style.cssText = 'flex-wrap:wrap;gap:4px 8px;';
+    const n = run.to-run.from+1;
+    row.innerHTML = `<span>${WEEKDAY_FULL[new Date(d+'T00:00:00').getDay()].slice(0,3)} ${fmtDateDisplay(d)} · ${esc(court.name)}<br><span class="hint">${hmFmt(run.from,true)}–${hmFmt(run.to+1,true)} · ${n} ${n===1?'ora':'ore'}</span></span>`;
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'small-btn'; b.textContent = 'Ripristina';
+    b.onclick = async () => {
+      if(!confirm('Riportare alle ore esatte '+hmFmt(run.from)+'–'+hmFmt(run.to+1)+' su '+court.name+' del '+fmtDateDisplay(d)+'?')) return;
+      try{ await restoreHalfShiftRun(court.id, d, run.from, run.to); }catch(e){ toast('Errore: '+e.message); }
+    };
+    row.appendChild(b); halfList.appendChild(row);
+  })));
+  if(!halfList.children.length) halfList.appendChild(emptyHintEl('Nessuna ora spostata.'));
 
   screen.querySelector('#addMemberBtn').onclick = async () => {
     const name = screen.querySelector('#addMemberName').value.trim();
