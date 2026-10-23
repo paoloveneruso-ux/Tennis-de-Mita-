@@ -4494,6 +4494,7 @@ function renderAdminScreen(host){
 
     <div class="card">
       <div class="section-title">Prenotazioni del ${fmtDateDisplay(state.selectedDate)} (${dayBookings.length + dayRecurring.length})</div>
+      <div class="field"><label>Giorno</label><input type="date" class="adminDayInput" value="${state.selectedDate}"></div>
       ${Object.keys(byTeacherToday).length ? `<div class="hint" style="margin-bottom:6px;">Incasso lezioni per maestro:</div>${Object.entries(byTeacherToday).map(([name,d])=>`<div class="list-row"><span>${name}</span><span class="pill">${d.hours}h · € ${d.revenue.toFixed(2)}</span></div>`).join('')}` : ''}
       <div id="bookingsHost">${(dayBookings.length||dayRecurring.length) ? '' : '<div class="hint">Nessuna prenotazione.</div>'}</div>
     </div>
@@ -4508,6 +4509,7 @@ function renderAdminScreen(host){
 
     <div class="card">
       <div class="section-title">Blocca uno slot (manutenzione / chiusura)</div>
+      <div class="field"><label>Giorno</label><input type="date" class="adminDayInput" value="${state.selectedDate}" min="${todayKey()}"></div>
       <div class="field"><label>Campo</label>
         <select id="blockCourt">${(state.club.courts||[]).map(c=>`<option value="${c.id}">${c.name}</option>`).join('')}</select>
       </div>
@@ -4520,6 +4522,7 @@ function renderAdminScreen(host){
     <div class="card">
       <div class="section-title">Ore alla mezz'ora (eccezione)</div>
       <div class="hint" style="margin-bottom:8px;">Una o più ore consecutive su un campo partono alla mezz'ora (19:00–20:00 diventa 19:30–20:30). Nella griglia dei soci non si vede: lo vede solo chi ha prenotato quell'ora. L'ora subito dopo la serie non è più prenotabile e la mezz'ora prima e dopo restano libere (le vede solo l'admin).</div>
+      <div class="field"><label>Giorno</label><input type="date" class="adminDayInput" value="${state.selectedDate}" min="${todayKey()}"></div>
       <div class="field"><label>Campo</label>
         <select id="halfCourt">${(state.club.courts||[]).map(c=>`<option value="${c.id}">${c.name}</option>`).join('')}</select>
       </div>
@@ -4887,6 +4890,9 @@ function renderAdminScreen(host){
     }catch(e){ toast('Errore: '+e.message); }
   };
 
+  screen.querySelectorAll('.adminDayInput').forEach(inp=>{
+    inp.onchange = () => { if(inp.value){ state.selectedDate = inp.value; renderApp(); } };
+  });
   screen.querySelector('#halfBtn').onclick = async () => {
     const courtId = screen.querySelector('#halfCourt').value;
     const from = parseInt(screen.querySelector('#halfHour').value,10);
