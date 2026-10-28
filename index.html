@@ -907,12 +907,16 @@ function courseDueSummary(course, payMap, billing, e){
   const fee = enrolleeFee(course, e);
   const blocks = billingBlocks(course, billing);
   const months = blocks.flat();
-  const s = { blocks, months, due:0, paid:0, exempt:0, dueMonths:[], methods:new Set(), fee, billing: billing==='monthly' ? 'monthly' : 'bimonthly' };
+  const s = { blocks, months, due:0, paid:0, paidAmount:0, exempt:0, dueMonths:[], methods:new Set(), fee, billing: billing==='monthly' ? 'monthly' : 'bimonthly' };
   months.forEach(m=>{
     const st = payStatus(payMap, m);
-    if(st==='paid'){ s.paid++; s.methods.add(payMethodOf(payMap, m) || '?'); } else if(st==='exempt') s.exempt++; else { s.due++; s.dueMonths.push(m); }
+    if(st==='paid'){
+      s.paid++; s.methods.add(payMethodOf(payMap, m) || '?');
+      const mt = payMap && payMap._meta && payMap._meta[m]; // importo registrato quando il mese è stato incassato (se manca, la quota attuale)
+      s.paidAmount += (mt && mt.a!=null && !isNaN(Number(mt.a))) ? Number(mt.a) : fee;
+    } else if(st==='exempt') s.exempt++; else { s.due++; s.dueMonths.push(m); }
   });
-  s.dueAmount = s.due*fee; s.paidAmount = s.paid*fee;
+  s.dueAmount = s.due*fee;
   return s;
 }
 function payPill(s){
@@ -972,8 +976,22 @@ function buildPayDetail(r, repaint){
       const lvl = box.querySelector('.enr-level').value;
       if(feeRaw!=='' && (isNaN(Number(feeRaw)) || Number(feeRaw)<0)){ toast('Quota non valida'); return; }
       try{
+        const oldFee = enrolleeFee(r.c, r.e);
+        const newFee = feeRaw==='' ? (Number(r.c.monthlyFee)||0) : Number(feeRaw);
+        const pm = (state.coursePayments[r.cid]||{})[r.eid] || {};
+        // mesi già incassati con un importo registrato diverso dalla nuova quota
+        const stale = newFee!==oldFee ? Object.keys(pm).filter(m=>m!=='_meta' && pm[m]===true && pm._meta && pm._meta[m] && pm._meta[m].a!=null && Number(pm._meta[m].a)!==newFee) : [];
+        let fixPaid = false;
+        if(stale.length){
+          const olds = [...new Set(stale.map(m=>Number(pm._meta[m].a)))].map(fmtEuro).join(' / ');
+          fixPaid = confirm('Questo corsista ha '+stale.length+(stale.length===1?' mese già pagato':' mesi già pagati')+' registrati a € '+olds+'.\n\nOK = aggiorna anche questi importi a € '+fmtEuro(newFee)+' (cambiano anche gli Incassi del mese in cui li hai incassati).\nAnnulla = la nuova quota vale solo per i mesi ancora da pagare.');
+        }
         await update(ref(db, cpath('courseEnrollments/'+r.cid+'/'+r.eid)), { fee: feeRaw==='' ? null : Number(feeRaw), livello: lvl || null });
-        toast('Salvato');
+        if(fixPaid){
+          const u = {}; stale.forEach(m=>{ u['_meta/'+m+'/a'] = newFee; });
+          await update(ref(db, cpath('coursePayments/'+r.cid+'/'+r.eid)), u);
+        }
+        toast(fixPaid ? 'Salvato · importi già incassati aggiornati' : 'Salvato');
       }catch(err){ toast('Errore: '+err.message); }
     };
     det.appendChild(box);
@@ -1120,6 +1138,40 @@ function collectPayments(){
   });
   return { list, legacy };
 }
+/* Riporta gli importi già incassati (registrati al momento del pagamento) alla quota attuale di ciascun corsista.
+   Serve quando le quote sono state cambiate dopo il pagamento: evita di correggere i mesi uno per uno. */
+function planAlignPaidAmounts(){
+  const groups = {}, people = {}; let months = 0, before = 0, after = 0;
+  Object.entries(state.courses||{}).forEach(([cid, c])=>{
+    Object.entries(state.courseEnrollments[cid]||{}).forEach(([eid, e])=>{
+      const pm = (state.coursePayments[cid]||{})[eid];
+      if(!pm || !pm._meta) return;
+      const fee = enrolleeFee(c, e);
+      Object.keys(pm).forEach(m=>{
+        if(m==='_meta' || pm[m]!==true) return;
+        const mt = pm._meta[m];
+        if(!mt || mt.a==null || Number(mt.a)===fee) return; // senza importo registrato o già uguale: niente da allineare
+        const k = cid+'/'+eid;
+        (groups[k] = groups[k] || {})['_meta/'+m+'/a'] = fee;
+        const pr = people[k] || (people[k] = { name:e.name||'—', course:c.name||'', n:0, from:new Set(), to:fee });
+        pr.n++; pr.from.add(Number(mt.a));
+        months++; before += Number(mt.a); after += fee;
+      });
+    });
+  });
+  return { groups, people, months, before, after };
+}
+async function alignPaidAmounts(){
+  const pl = planAlignPaidAmounts();
+  if(!pl.months){ toast('Gli importi incassati sono già uguali alle quote attuali'); return; }
+  const rows = Object.values(pl.people).sort((a,b)=>b.n-a.n).slice(0,8)
+    .map(p=>'• '+p.name+': € '+[...p.from].map(fmtEuro).join(' / ')+' → € '+fmtEuro(p.to)+' ('+p.n+(p.n===1?' mese':' mesi')+')').join('\n');
+  const more = Object.keys(pl.people).length>8 ? '\n… e altri '+(Object.keys(pl.people).length-8) : '';
+  const diff = pl.after-pl.before;
+  if(!confirm(pl.months+(pl.months===1?' mese pagato':' mesi pagati')+' di '+Object.keys(pl.people).length+(Object.keys(pl.people).length===1?' corsista hanno':' corsisti hanno')+' un importo incassato diverso dalla quota attuale.\n\n'+rows+more+'\n\nTotale € '+fmtEuro(pl.before)+' → € '+fmtEuro(pl.after)+' ('+(diff>=0?'+':'−')+'€ '+fmtEuro(Math.abs(diff))+').\n\nAllineo gli incassi già registrati alle quote attuali?')) return;
+  await Promise.all(Object.entries(pl.groups).map(([k, u])=>update(ref(db, cpath('coursePayments/'+k)), u)));
+  toast('Importi allineati: '+pl.months+(pl.months===1?' mese':' mesi'));
+}
 function renderIncassiScreen(host){
   if(!state.isAdmin){ state.corsiView = 'corsi'; return renderCorsiScreen(host); }
   const courses = Object.entries(state.courses||{});
@@ -1141,9 +1193,19 @@ function renderIncassiScreen(host){
       <button class="btn-ghost" id="incCopy" style="width:100%;margin-top:10px;">Copia riepilogo del mese</button>
     </div>
     <div class="card"><div class="section-title">Per corso</div><div id="incCourses"></div></div>
-    <div class="card"><div class="section-title" id="incListTitle">Pagamenti del mese</div><div id="incList"></div></div>`;
+    <div class="card"><div class="section-title" id="incListTitle">Pagamenti del mese</div><div id="incList"></div></div>
+    ${state.isAdmin ? `<div class="card"><div class="section-title">Allinea gli importi incassati</div>
+      <div class="hint" style="margin-bottom:8px;">Se hai cambiato la quota di corsisti che avevano già pagato, qui riporti tutti gli incassi già registrati alla quota attuale di ciascuno, in un colpo solo. Prima vedi chi cambia e di quanto, poi confermi.</div>
+      <button class="btn-ghost" id="incAlign" style="width:100%;">Allinea alle quote attuali…</button></div>` : ''}`;
   host.replaceChildren(screen);
   bindCorsiSwitch(screen);
+  const alignBtn = screen.querySelector('#incAlign');
+  if(alignBtn) alignBtn.onclick = async () => {
+    if(loadedCount < courses.length){ toast('Attendi il caricamento dei dati…'); return; }
+    alignBtn.disabled = true;
+    try{ await alignPaidAmounts(); }catch(err){ toast('Errore: '+err.message); }
+    alignBtn.disabled = false;
+  };
 
   const { list, legacy } = collectPayments();
   const ym = state.incMonth;
@@ -1158,7 +1220,8 @@ function renderIncassiScreen(host){
   screen.querySelector('#incTotals').innerHTML = `
     <div class="list-row"><span>Contanti</span><span class="pill">€ ${fmtEuro(cash)} · ${cnt(inMonth,'cash')} pag.</span></div>
     <div class="list-row"><span>Carta</span><span class="pill">€ ${fmtEuro(card)} · ${cnt(inMonth,'card')} pag.</span></div>
-    <div class="list-row"><span><b style="color:var(--chalk);">Totale</b></span><span class="pill" style="color:var(--ball-text);border-color:var(--ball-dim);">€ ${fmtEuro(total)} · ${inMonth.length} pag.</span></div>`;
+    <div class="list-row"><span><b style="color:var(--chalk);">Totale</b></span><span class="pill" style="color:var(--ball-text);border-color:var(--ball-dim);">€ ${fmtEuro(total)} · ${inMonth.length} pag.</span></div>
+    <div class="list-row"><span class="hint">Tutti i mesi insieme</span><span class="pill">€ ${fmtEuro(list.reduce((a,g)=>a+g.amount,0))} · ${list.length} pag.</span></div>`;
   const cur = currentYearMonth();
   let note = ym===cur ? 'Mese in corso: totale provvisorio, si aggiorna a ogni pagamento registrato.' : (ym<cur ? 'Mese chiuso.' : 'Mese futuro.');
   if(legacy>0) note += ' ' + legacy + (legacy===1?' mese risulta pagato':' mesi risultano pagati') + ' senza metodo (registrati prima): aprili in Pagamenti e scegli Contanti o Carta.';
