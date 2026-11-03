@@ -610,6 +610,11 @@ const state = {
   courseEnrollments: {}, // popolato on-demand per il corso aperto
   courseAttendance: {},  // popolato on-demand per corso+sessione aperti
   courseAttendanceByCourse: {}, // { [cid]: { [date]: { [eid]: true|false } } } storico completo per le assenze
+  teacherPlan: {},       // maestro predefinito per ora: { [cid]: { [slot]: { [dal]: {uid|xid,name} | {reset:true} } } }
+  lessonTeachers: {},    // maestro per singola lezione: { [cid]: { [data]: { [h17]: {uid|xid,name} } } }
+  extraTeachers: {},     // maestri non registrati aggiunti a mano: { [xid]: {name} }
+  teacherLoaded: {},
+  teachersCourseId: null, ttFrom: null, ttDay: null, ttScope: 'day', ttMonth: null, ttIncludeRain: false, ttOpen: {},
   absencesCourseId: null,
   coursePayments: {},    // { [cid]: { [eid]: { 'YYYY-MM': true|false } } }
   myEnrollments: {},      // { [cid]: eid }
@@ -1102,7 +1107,7 @@ async function setPayment(cid, eid, m, status){
 function corsiSwitchHtml(){
   const v = state.corsiView;
   const btn = (k,lab)=>'<button data-v="'+k+'" class="'+((v||'corsi')===k?'active':'')+'">'+lab+'</button>';
-  return '<div class="seg" id="corsiSwitch">'+btn('corsi','Corsi')+btn('pagamenti','Pagamenti')+btn('incassi','Incassi')+'</div>';
+  return '<div class="seg" id="corsiSwitch">'+btn('corsi','Corsi')+btn('pagamenti','Pagamenti')+btn('incassi','Incassi')+btn('maestri','Maestri')+'</div>';
 }
 function bindCorsiSwitch(scope){
   scope.querySelectorAll('#corsiSwitch button').forEach(b=>{ b.onclick = ()=>{ state.corsiView = b.dataset.v; renderApp(); }; });
@@ -2495,6 +2500,7 @@ function attachListeners(){
   onValue(ref(db, cpath('halfShifts')), s=>{ state.halfShifts = s.val()||{}; renderCurrent(); }, err=>console.error('halfShifts', err)); // se le regole non lo permettono l'app funziona come prima
   onValue(ref(db, cpath('myBookings/'+state.uid)), s=>{ state.myBookingIds = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('teachers')), s=>{ state.teachers = s.val()||{}; state.isTeacher = !!state.teachers[state.uid]; renderCurrent(); }, showFatalError);
+  onValue(ref(db, cpath('extraTeachers')), s=>{ state.extraTeachers = s.val()||{}; renderCurrent(); }, err=>console.error('extraTeachers', err));
   onValue(ref(db, cpath('myTeachingBookings/'+state.uid)), s=>{ state.myTeachingBookings = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('courses')), s=>{ state.courses = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('recurringBookings')), s=>{ state.recurringBookings = s.val()||{}; renderCurrent(); }, showFatalError);
@@ -2617,6 +2623,344 @@ function loadCourseAttendanceAll(cid){
   }, err=>console.error('attendance-all', err));
 }
 
+/* ================= Maestro per ora di corso =================
+   courseTeacherPlan/{cid}/{slot}/{dal}  = { uid|xid, name } | { reset:true }
+        maestro PREDEFINITO di un'ora settimanale (slot = giorno_ora_campo), valido dalla data "dal" in poi.
+        Le voci precedenti restano: lo storico delle ore già fatte non cambia quando si cambia maestro.
+   courseLessonTeachers/{cid}/{data}/{h17[_campo]} = { uid|xid, name }
+        cambio per UN solo giorno: ha la precedenza sul predefinito.
+   extraTeachers/{xid} = { name }
+        maestri non registrati nell'app, aggiunti a mano e tenuti a memoria.
+   Se per un'ora non c'è nessuna assegnazione vale il maestro del corso (teacherUid). */
+function lessonKey(hour, courtId){ return 'h'+hour+(courtId!=null && courtId!=='' ? '_'+String(courtId).replace(/[.$#\[\]\/]/g,'-') : ''); }
+function memberNameByUid(uid){ const m = Object.values(state.members||{}).find(x=>x && x.uid===uid); return m ? (m.name||'') : ''; }
+function teacherName(t){
+  if(!t) return '';
+  if(t.uid) return memberNameByUid(t.uid) || t.name || 'Maestro';
+  if(t.xid) return (state.extraTeachers[t.xid]||{}).name || t.name || 'Maestro';
+  return t.name || '';
+}
+function teacherChoiceValue(t){ return t && t.uid ? 'u:'+t.uid : (t && t.xid ? 'x:'+t.xid : ''); }
+function teacherFromChoice(v){
+  if(typeof v!=='string') return null;
+  if(v.indexOf('u:')===0){ const uid = v.slice(2); return uid ? { uid, name: memberNameByUid(uid) } : null; }
+  if(v.indexOf('x:')===0){ const xid = v.slice(2); return xid ? { xid, name: (state.extraTeachers[xid]||{}).name || '' } : null; }
+  return null;
+}
+function teacherNode(t){ return t.uid ? { uid:t.uid, name:t.name||'' } : { xid:t.xid, name:t.name||'' }; }
+
+/* maestro predefinito di un'ora settimanale in una certa data */
+function defaultSlotTeacher(cid, weekday, hour, courtId, date){
+  const c = state.courses[cid] || {};
+  const plan = (state.teacherPlan[cid]||{})[sessionKey(weekday, hour, courtId)];
+  let best = null;
+  if(plan) Object.keys(plan).sort().forEach(f=>{ if(f <= date) best = plan[f]; });
+  if(best && (best.uid || best.xid)) return Object.assign({ src:'plan' }, best);
+  if(c.teacherUid) return { uid:c.teacherUid, name:c.teacherName||'', src:'course' };
+  return null;
+}
+/* maestro che tiene davvero quella lezione: cambio del giorno, altrimenti predefinito */
+function lessonTeacher(cid, date, hour, courtId){
+  const ov = ((state.lessonTeachers[cid]||{})[date]||{})[lessonKey(hour, courtId)];
+  if(ov && (ov.uid || ov.xid)) return Object.assign({ src:'day' }, ov);
+  const dow = new Date(date+'T00:00:00').getDay();
+  return defaultSlotTeacher(cid, dow, hour, courtId, date);
+}
+
+const teacherDataLoaded = new Set();
+function loadTeacherData(cid){
+  if(teacherDataLoaded.has(cid)) return;
+  teacherDataLoaded.add(cid);
+  const flag = k => { (state.teacherLoaded[cid] = state.teacherLoaded[cid] || {})[k] = true; };
+  onValue(ref(db, cpath('courseTeacherPlan/'+cid)), s=>{ state.teacherPlan[cid] = s.val()||{}; flag('p'); renderCurrent(); }, err=>{ console.error('courseTeacherPlan', err); flag('p'); });
+  onValue(ref(db, cpath('courseLessonTeachers/'+cid)), s=>{ state.lessonTeachers[cid] = s.val()||{}; flag('l'); renderCurrent(); }, err=>{ console.error('courseLessonTeachers', err); flag('l'); });
+}
+
+async function addExtraTeacher(){
+  const name = (window.prompt('Nome e cognome del maestro (non registrato nell\'app):') || '').trim().slice(0, 80);
+  if(!name) return null;
+  const dup = Object.entries(state.extraTeachers||{}).find(([_,x])=>x && String(x.name).toLowerCase()===name.toLowerCase());
+  if(dup) return dup[0];
+  const r = push(ref(db, cpath('extraTeachers')));
+  await set(r, { name, createdAt: Date.now() });
+  state.extraTeachers[r.key] = { name };
+  toast('Maestro aggiunto: '+name);
+  return r.key;
+}
+
+function teacherOptionsHtml(cur, noneLabel){
+  const reg = Object.keys(state.teachers||{}).filter(u=>state.teachers[u]).map(u=>({ v:'u:'+u, l: memberNameByUid(u) || 'Maestro (senza nome)' }));
+  const ext = Object.entries(state.extraTeachers||{}).filter(([_,x])=>x && x.name).map(([id,x])=>({ v:'x:'+id, l:x.name }));
+  const cmp = (a,b)=>a.l.localeCompare(b.l,'it');
+  reg.sort(cmp); ext.sort(cmp);
+  const known = new Set([...reg, ...ext].map(o=>o.v));
+  const opt = o => '<option value="'+esc(o.v)+'">'+esc(o.l)+'</option>';
+  let h = '<option value="">'+esc(noneLabel)+'</option>';
+  const cv = teacherChoiceValue(cur);
+  if(cv && !known.has(cv)) h += opt({ v:cv, l:teacherName(cur) }); // maestro non più nell'elenco ma ancora assegnato
+  if(reg.length) h += '<optgroup label="Maestri del circolo">'+reg.map(opt).join('')+'</optgroup>';
+  if(ext.length) h += '<optgroup label="Altri maestri">'+ext.map(opt).join('')+'</optgroup>';
+  h += '<option value="__new__">＋ Aggiungi altro maestro…</option>';
+  return h;
+}
+/* menu a tendina dei maestri; onPick(valore) salva. cur = maestro attualmente scelto (o null) */
+function buildTeacherSelect(cur, noneLabel, onPick){
+  const sel = document.createElement('select');
+  sel.style.width = '100%';
+  const fill = () => { sel.innerHTML = teacherOptionsHtml(cur, noneLabel); sel.value = teacherChoiceValue(cur); };
+  fill();
+  sel.onchange = async () => {
+    let v = sel.value;
+    if(v === '__new__'){
+      let id = null;
+      try{ id = await addExtraTeacher(); }catch(err){ toast('Errore: '+err.message); }
+      if(!id){ fill(); return; }
+      v = 'x:'+id;
+    }
+    sel.disabled = true;
+    try{ await onPick(v); }catch(err){ toast('Errore: '+err.message); fill(); }
+    sel.disabled = false;
+  };
+  return sel;
+}
+
+/* maestro predefinito di un'ora settimanale, valido dal giorno "from" */
+async function setSlotDefault(cid, x, val, from){
+  const c = state.courses[cid] || {};
+  const slot = sessionKey(x.weekday, x.hour, x.courtId);
+  const existing = (state.teacherPlan[cid]||{})[slot];
+  const hasAny = !!(existing && Object.keys(existing).length);
+  const t = teacherFromChoice(val);
+  if(!hasAny && !t){ toast('Già impostato sul maestro del corso'); return; }
+  let f = from;
+  if(!hasAny && c.startDate && c.startDate < f) f = c.startDate; // la prima assegnazione vale dall'inizio del corso
+  await set(ref(db, cpath('courseTeacherPlan/'+cid+'/'+slot+'/'+f)), t ? teacherNode(t) : { reset:true });
+  toast(t ? 'Maestro predefinito: '+teacherName(t)+' (dal '+fmtDateDisplay(f)+')' : 'Torna il maestro del corso (dal '+fmtDateDisplay(f)+')');
+}
+/* maestro di una singola lezione; scope 'day' = solo quel giorno, 'from' = quel giorno e tutti i successivi della stessa ora */
+async function setLessonTeacher(cid, date, x, val, scope){
+  const t = teacherFromChoice(val);
+  const lk = lessonKey(x.hour, x.courtId);
+  if(scope === 'from'){
+    const upd = {};
+    upd['courseTeacherPlan/'+cid+'/'+sessionKey(x.weekday, x.hour, x.courtId)+'/'+date] = t ? teacherNode(t) : { reset:true };
+    Object.entries(state.lessonTeachers[cid]||{}).forEach(([d, m])=>{ // i cambi singoli già fissati sui giorni successivi di quest'ora non servono più
+      if(d >= date && m && m[lk] && new Date(d+'T00:00:00').getDay() === x.weekday) upd['courseLessonTeachers/'+cid+'/'+d+'/'+lk] = null;
+    });
+    await update(ref(db, cpath('')), upd);
+    toast(t ? 'Maestro '+teacherName(t)+' dal '+fmtDateDisplay(date)+' in poi' : 'Maestro predefinito dal '+fmtDateDisplay(date)+' in poi');
+  } else {
+    const p = ref(db, cpath('courseLessonTeachers/'+cid+'/'+date+'/'+lk));
+    if(t) await set(p, teacherNode(t)); else await remove(p);
+    toast(t ? 'Maestro '+teacherName(t)+' per il '+fmtDateDisplay(date) : 'Ripristinato il maestro predefinito');
+  }
+}
+
+/* blocco "maestro di ogni ora" per un giorno (usato in Corsi → Maestri, in Presenze e nel calendario del maestro).
+   opts.hour/courtId = mostra solo quell'ora; opts.noScope = senza scelta "solo oggi / giorni successivi" */
+function buildDayTeachersBlock(cid, date, opts){
+  opts = opts || {};
+  const c = state.courses[cid] || {};
+  const dow = new Date(date+'T00:00:00').getDay();
+  let slots = (date >= c.startDate && date <= c.endDate) ? uniqueSessions(c).filter(x=>x.weekday===dow) : [];
+  if(opts.hour != null) slots = slots.filter(x=>x.hour===opts.hour && (!opts.courtId || x.courtId===opts.courtId));
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'margin:8px 0;padding:10px;border:1px solid var(--line);border-radius:8px;';
+  if(!slots.length){ wrap.innerHTML = '<div class="hint">Nessuna lezione di questo corso in questo giorno.</div>'; return wrap; }
+  const title = document.createElement('div');
+  title.className = 'hint';
+  title.innerHTML = '<b style="color:var(--chalk);">Maestro della lezione</b> · '+esc(WEEKDAY_FULL[dow])+' '+esc(fmtDateDisplay(date));
+  wrap.appendChild(title);
+  if(!opts.noScope){
+    const sc = document.createElement('select');
+    sc.style.cssText = 'width:100%;margin-top:6px;';
+    sc.innerHTML = '<option value="day">Cambio: solo questo giorno</option><option value="from">Cambio: da questo giorno in poi</option>';
+    sc.value = state.ttScope === 'from' ? 'from' : 'day';
+    sc.onchange = () => { state.ttScope = sc.value; };
+    wrap.appendChild(sc);
+  }
+  const multi = multiCourt(c);
+  slots.forEach(x=>{
+    const lk = lessonKey(x.hour, x.courtId);
+    const ov = ((state.lessonTeachers[cid]||{})[date]||{})[lk];
+    const hasOv = !!(ov && (ov.uid || ov.xid));
+    const def = defaultSlotTeacher(cid, x.weekday, x.hour, x.courtId, date);
+    const row = document.createElement('div');
+    row.style.marginTop = '8px';
+    const lab = document.createElement('div');
+    lab.className = 'hint';
+    lab.style.marginBottom = '4px';
+    lab.textContent = String(x.hour).padStart(2,'0')+':00'+(multi && courtNameOf(x.courtId) ? ' · '+courtNameOf(x.courtId) : '')+(hasOv ? ' · cambiato solo per questo giorno' : '');
+    row.appendChild(lab);
+    row.appendChild(buildTeacherSelect(hasOv ? ov : null, '— predefinito: '+(def ? teacherName(def) : 'nessuno')+' —', v=>setLessonTeacher(cid, date, x, v, opts.noScope ? 'day' : state.ttScope)));
+    wrap.appendChild(row);
+  });
+  return wrap;
+}
+
+/* maestro predefinito di ogni ora settimanale del corso */
+function buildSlotDefaultsBlock(cid){
+  const c = state.courses[cid] || {};
+  const wrap = document.createElement('div');
+  const minFrom = c.startDate && c.startDate > todayKey() ? c.startDate : todayKey();
+  const from = state.ttFrom || minFrom;
+  wrap.innerHTML = '<div class="hint" style="margin-bottom:8px;">Scegli chi tiene ogni ora settimanale del corso. Un cambio vale dalla data indicata in poi: le lezioni già fatte restano a chi le ha tenute. La prima assegnazione di un\'ora vale dall\'inizio del corso.</div>'
+    + '<div class="field"><label>Le modifiche valgono dal</label><input id="ttFrom-'+esc(cid)+'" type="date" value="'+esc(from)+'"></div>';
+  wrap.querySelector('input').onchange = (e)=>{ state.ttFrom = e.target.value || null; renderApp(); };
+  const noneLabel = c.teacherName ? '— maestro del corso ('+c.teacherName+') —' : '— nessun maestro —';
+  uniqueSessions(c).forEach(x=>{
+    const cur = defaultSlotTeacher(cid, x.weekday, x.hour, x.courtId, from);
+    const row = document.createElement('div');
+    row.style.marginTop = '8px';
+    const lab = document.createElement('div');
+    lab.className = 'hint';
+    lab.style.marginBottom = '4px';
+    lab.textContent = sessionLabel(x, true);
+    row.appendChild(lab);
+    row.appendChild(buildTeacherSelect(cur && cur.src==='plan' ? cur : null, noneLabel, v=>setSlotDefault(cid, x, v, from)));
+    wrap.appendChild(row);
+  });
+  return wrap;
+}
+
+/* pannello "Maestri" del corso (admin o maestro del corso) */
+function buildTeachersPanel(cid){
+  const c = state.courses[cid] || {};
+  if(!state.ttDay) state.ttDay = nextSessionDate(c);
+  const box = document.createElement('div');
+  box.style.cssText = 'margin-top:12px;border-top:1px solid var(--line);padding-top:12px;';
+  box.innerHTML = '<div class="section-title">Maestri — '+esc(c.name||'')+'</div>'
+    + '<div class="section-title" style="margin-top:8px;font-size:13px;">Maestro predefinito di ogni ora</div><div id="ttSlots"></div>'
+    + '<div class="section-title" style="margin-top:16px;font-size:13px;">Giorno per giorno</div>'
+    + '<div class="hint" style="margin-bottom:8px;">Per un cambio di maestro in una data precisa (sostituzione, scambio di ora) scegli il giorno e cambia l\'ora interessata.</div>'
+    + '<div class="field"><label>Giorno</label><input id="ttDay-'+esc(cid)+'" type="date" value="'+esc(state.ttDay)+'"></div><div id="ttDayBlock"></div>';
+  box.querySelector('#ttSlots').appendChild(buildSlotDefaultsBlock(cid));
+  box.querySelector('#ttDay-'+cid).onchange = (e)=>{ state.ttDay = e.target.value || nextSessionDate(c); renderApp(); };
+  box.querySelector('#ttDayBlock').appendChild(buildDayTeachersBlock(cid, state.ttDay));
+  return box;
+}
+
+/* ================= Ore maestri del mese (solo admin) ================= */
+function computeTeacherHours(ym, includeRain){
+  const now = new Date();
+  const [y, mo] = ym.split('-').map(Number);
+  const nd = new Date(y, mo, 0).getDate();
+  const rows = {};
+  Object.entries(state.courses||{}).forEach(([cid, c])=>{
+    const sess = uniqueSessions(c);
+    for(let d = 1; d <= nd; d++){
+      const date = ym+'-'+String(d).padStart(2,'0');
+      if(date < c.startDate || date > c.endDate) continue;
+      const dow = new Date(date+'T00:00:00').getDay();
+      sess.filter(s=>s.weekday===dow).forEach(s=>{
+        const t = lessonTeacher(cid, date, s.hour, s.courtId);
+        const key = t ? (t.uid ? 'u:'+t.uid : 'x:'+t.xid) : '-';
+        const row = rows[key] || (rows[key] = { key, name: t ? teacherName(t) : 'Senza maestro assegnato', registered: !!(t && t.uid), unassigned: !t, slots:{} });
+        const sk = date+'|'+s.hour; // più campi alla stessa ora per lo stesso maestro: un'ora sola
+        const it = row.slots[sk] || (row.slots[sk] = { date, hour:s.hour, parts:[], rainAll:true });
+        it.parts.push({ course:c.name||'', court: multiCourt(c) ? courtNameOf(s.courtId) : '' });
+        if(!lessonRainOn(cid, date, s.hour, s.courtId)) it.rainAll = false;
+      });
+    }
+  });
+  return Object.values(rows).map(r=>{
+    r.list = Object.values(r.slots).sort((a,b)=>a.date.localeCompare(b.date) || a.hour-b.hour);
+    r.done = 0; r.planned = 0; r.rain = 0;
+    r.list.forEach(it=>{
+      it.future = slotDateTime(it.date, it.hour) > now;
+      it.rain = it.rainAll;
+      if(it.rain && !includeRain) r.rain++;
+      else if(it.future) r.planned++;
+      else r.done++;
+    });
+    return r;
+  }).sort((a,b)=> (a.unassigned?1:0)-(b.unassigned?1:0) || b.done-a.done || a.name.localeCompare(b.name,'it'));
+}
+function renderTeacherHoursScreen(host){
+  if(!state.isAdmin){ state.corsiView = 'corsi'; return renderCorsiScreen(host); }
+  const courses = Object.entries(state.courses||{});
+  courses.forEach(([cid])=>{ loadCourseEnrollments(cid); loadCourseAttendanceAll(cid); loadTeacherData(cid); });
+  if(!state.ttMonth) state.ttMonth = currentYearMonth();
+  const ym = state.ttMonth;
+  const loaded = courses.filter(([cid])=> state.courseEnrollments[cid]!==undefined && state.courseAttendanceByCourse[cid]!==undefined && (state.teacherLoaded[cid]||{}).p && (state.teacherLoaded[cid]||{}).l).length;
+  const rows = computeTeacherHours(ym, state.ttIncludeRain);
+  const sum = k => rows.reduce((a,r)=>a+r[k], 0);
+  const totDone = sum('done'), totPlanned = sum('planned'), totRain = sum('rain');
+
+  const screen = document.createElement('div');
+  screen.className = 'screen';
+  screen.innerHTML = `
+    ${corsiSwitchHtml()}
+    <div class="card">
+      <div class="section-title">Ore dei maestri</div>
+      <div class="seg" style="margin-bottom:10px;">
+        <button id="ttPrev">◀</button><button id="ttLabel" style="flex:3;cursor:default;text-transform:capitalize;"></button><button id="ttNext">▶</button>
+      </div>
+      <div id="ttTotals"></div>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;"><input type="checkbox" id="ttRain" style="width:auto;margin:0;" ${state.ttIncludeRain?'checked':''}> Conta anche le ore annullate per pioggia</label>
+      <div class="hint" id="ttNote" style="margin-top:8px;"></div>
+      <button class="btn-ghost" id="ttCopy" style="width:100%;margin-top:10px;">Copia riepilogo del mese</button>
+    </div>
+    <div class="card"><div class="section-title">Per maestro</div><div id="ttList"></div></div>`;
+  host.replaceChildren(screen);
+  bindCorsiSwitch(screen);
+
+  screen.querySelector('#ttLabel').textContent = fmtMonth(ym);
+  screen.querySelector('#ttPrev').onclick = () => { state.ttMonth = addMonthsYM(ym,-1); renderApp(); };
+  screen.querySelector('#ttNext').onclick = () => { state.ttMonth = addMonthsYM(ym,1); renderApp(); };
+  screen.querySelector('#ttRain').onchange = (e) => { state.ttIncludeRain = e.target.checked; renderApp(); };
+  screen.querySelector('#ttTotals').innerHTML = `
+    <div class="list-row"><span><b style="color:var(--chalk);">Ore fatte (tutti i maestri)</b></span><span class="pill" style="color:var(--ball-text);border-color:var(--ball-dim);">${totDone} ore</span></div>
+    ${totPlanned ? `<div class="list-row"><span class="hint">Ancora da fare nel mese</span><span class="pill">${totPlanned} ore</span></div>` : ''}
+    ${totRain ? `<div class="list-row"><span class="hint">Annullate per pioggia (non contate)</span><span class="pill rain">${totRain} ore</span></div>` : ''}`;
+  const cur = currentYearMonth();
+  let note = ym===cur ? 'Mese in corso: totale provvisorio, una lezione conta dal suo inizio.' : (ym<cur ? 'Mese chiuso.' : 'Mese futuro: solo ore previste.');
+  note += ' Se lo stesso maestro è su più campi alla stessa ora, l\'ora conta una volta sola.';
+  if(loaded < courses.length) note += ' Carico i dati… ('+loaded+'/'+courses.length+' corsi)';
+  screen.querySelector('#ttNote').textContent = note;
+
+  const listHost = screen.querySelector('#ttList');
+  if(!rows.length) listHost.innerHTML = `<div class="hint">Nessuna lezione di corso in questo mese.</div>`;
+  const lineOf = it => WEEKDAY_FULL[new Date(it.date+'T00:00:00').getDay()].slice(0,3)+' '+it.date.slice(8)+'/'+it.date.slice(5,7)+' · '+String(it.hour).padStart(2,'0')+':00 · '
+    + it.parts.map(p=>p.course+(p.court?' ('+p.court+')':'')).join(' + ')
+    + (it.rain ? (state.ttIncludeRain ? ' · pioggia (contata)' : ' · pioggia, non contata') : (it.future ? ' · da fare' : ''));
+  rows.forEach(r=>{
+    const open = !!state.ttOpen[r.key];
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'border-bottom:1px solid var(--line);';
+    const head = document.createElement('div');
+    head.className = 'list-row';
+    head.style.cssText = 'border-bottom:none;cursor:pointer;flex-wrap:wrap;gap:4px 8px;';
+    const sub = [];
+    if(r.planned) sub.push(r.planned+' da fare');
+    if(r.rain && !state.ttIncludeRain) sub.push(r.rain+' pioggia');
+    head.innerHTML = `<span><b style="color:var(--chalk);">${esc(r.name)}</b>${r.unassigned ? '' : (r.registered ? '' : ' <span class="hint">· non registrato</span>')}${sub.length ? '<br><span class="hint">'+esc(sub.join(' · '))+'</span>' : ''}</span><span class="pill">${r.done} ${r.done===1?'ora':'ore'} ${open?'▴':'▾'}</span>`;
+    head.onclick = () => { state.ttOpen[r.key] = !open; renderApp(); };
+    wrap.appendChild(head);
+    if(open){
+      const det = document.createElement('div');
+      det.style.cssText = 'padding:0 0 10px;font-size:13px;';
+      det.innerHTML = r.list.map(it=>'<div class="hint" style="padding:3px 0;">'+esc(lineOf(it))+'</div>').join('');
+      wrap.appendChild(det);
+    }
+    listHost.appendChild(wrap);
+  });
+
+  screen.querySelector('#ttCopy').onclick = async () => {
+    const lines = ['Ore maestri — '+fmtMonth(ym), 'Totale ore fatte: '+totDone+(totPlanned ? ' (altre '+totPlanned+' da fare)' : '')];
+    if(rows.length) lines.push('');
+    rows.forEach(r=>{
+      lines.push(r.name+': '+r.done+(r.done===1?' ora':' ore')+(r.planned ? ' (+'+r.planned+' da fare)' : '')+(r.rain && !state.ttIncludeRain ? ' ['+r.rain+' annullate per pioggia]' : ''));
+      r.list.filter(it=>!it.future && (state.ttIncludeRain || !it.rain)).forEach(it=>lines.push('  - '+lineOf(it)));
+    });
+    const text = lines.join('\n');
+    try{
+      if(navigator.clipboard && navigator.clipboard.writeText){ await navigator.clipboard.writeText(text); toast('Riepilogo copiato'); }
+      else { window.prompt('Copia il riepilogo:', text); }
+    }catch(_){ window.prompt('Copia il riepilogo:', text); }
+  };
+}
+
 function isSessionOnDate(course, dateStr){
   if(dateStr < course.startDate || dateStr > course.endDate) return false;
   const dow = new Date(dateStr+'T00:00:00').getDay();
@@ -2707,7 +3051,7 @@ function renderApp(){
       ${state.isAdmin ? `<button data-tab="admin" class="${activeTab==='admin'?'active':''}">Admin</button>` : ''}
       ${state.isSuperAdmin ? `<button data-tab="registro" class="${activeTab==='registro'?'active':''}">Registro</button>` : ''}
     </div>`;
-  root.querySelectorAll('.tabbar button').forEach(b=>{ b.onclick = () => { state.tab = b.dataset.tab; state.openCourseId = null; state.attendanceCourseId = null; state.absencesCourseId = null; renderApp(); }; });
+  root.querySelectorAll('.tabbar button').forEach(b=>{ b.onclick = () => { state.tab = b.dataset.tab; state.openCourseId = null; state.attendanceCourseId = null; state.absencesCourseId = null; state.teachersCourseId = null; renderApp(); }; });
   root.querySelector('#headerProfile').querySelector('.avatar,.avatar-initials').style.cursor = 'pointer';
   root.querySelector('#headerProfile').querySelector('.avatar,.avatar-initials').onclick = () => renderProfileModal();
   root.querySelector('#headerEsci').onclick = doLogout;
@@ -3322,6 +3666,7 @@ function countRecurringOccurrences(r, periodStartDate, periodEndDate){
 function renderCorsiScreen(host){
   if(state.isAdmin && state.corsiView==='pagamenti'){ renderPaymentsScreen(host); return; }
   if(state.isAdmin && state.corsiView==='incassi'){ renderIncassiScreen(host); return; }
+  if(state.isAdmin && state.corsiView==='maestri'){ renderTeacherHoursScreen(host); return; }
   const canSeeAllCourses = state.isAdmin || state.isTeacher;
   const courseList = Object.entries(state.courses||{})
     .filter(([cid])=> canSeeAllCourses || state.myEnrollments[cid])
@@ -3504,7 +3849,7 @@ function renderCorsiScreen(host){
   const courseSelect = screen.querySelector('#courseSelect');
   if(courseSelect) courseSelect.onchange = (e)=>{
     state.selectedCourseId = e.target.value || null;
-    state.openCourseId = null; state.attendanceCourseId = null; state.absencesCourseId = null;
+    state.openCourseId = null; state.attendanceCourseId = null; state.absencesCourseId = null; state.teachersCourseId = null; state.ttDay = null; state.ttFrom = null;
     renderApp();
   };
   if(!courseList.length){
@@ -3522,6 +3867,7 @@ function renderCorsiScreen(host){
     const myStatus = nl ? attGet(state.myAttendance[cid+'|'+nl.date], nl.hour) : undefined;
     const canDeclare = !!nl && nowDate() < attendanceCutoff(nl.date, nl.hour);
     const row1 = [], row2 = [];
+    if(state.isAdmin || isMyCourse){ loadTeacherData(cid); row2.push(`<button class="btn-ghost" data-act="teachers" data-cid="${cid}">Maestri</button>`); }
     if(state.isAdmin) row1.push(`<button class="btn-ghost" data-act="enroll" data-cid="${cid}">Iscritti</button>`);
     if(state.isAdmin || isMyCourse){
       row1.push(`<button class="btn-clay" data-act="attendance" data-cid="${cid}">Presenze</button>`);
@@ -3585,9 +3931,19 @@ function renderCorsiScreen(host){
     btn.onclick = () => {
       const cid = btn.dataset.cid;
       const willOpen = state.absencesCourseId !== cid;
-      state.openCourseId = null; state.attendanceCourseId = null;
+      state.openCourseId = null; state.attendanceCourseId = null; state.teachersCourseId = null;
       state.absencesCourseId = willOpen ? cid : null;
       if(willOpen){ loadCourseEnrollments(cid); loadCourseAttendanceAll(cid); }
+      renderApp();
+    };
+  });
+  cardsHost.querySelectorAll('[data-act="teachers"]').forEach(btn=>{
+    btn.onclick = () => {
+      const cid = btn.dataset.cid;
+      const willOpen = state.teachersCourseId !== cid;
+      state.openCourseId = null; state.attendanceCourseId = null; state.absencesCourseId = null;
+      state.teachersCourseId = willOpen ? cid : null;
+      if(willOpen){ loadTeacherData(cid); state.ttDay = nextSessionDate(state.courses[cid]); state.ttFrom = null; }
       renderApp();
     };
   });
@@ -3595,7 +3951,7 @@ function renderCorsiScreen(host){
     btn.onclick = () => {
       const cid = btn.dataset.cid;
       const willOpen = state.openCourseId !== cid;
-      state.attendanceCourseId = null; state.absencesCourseId = null;
+      state.attendanceCourseId = null; state.absencesCourseId = null; state.teachersCourseId = null;
       state.openCourseId = willOpen ? cid : null;
       if(willOpen){ loadCourseEnrollments(cid); loadCoursePaymentsForCourse(cid); }
       renderApp();
@@ -3605,7 +3961,7 @@ function renderCorsiScreen(host){
     btn.onclick = () => {
       const cid = btn.dataset.cid;
       const willOpen = state.attendanceCourseId !== cid;
-      state.openCourseId = null; state.absencesCourseId = null;
+      state.openCourseId = null; state.absencesCourseId = null; state.teachersCourseId = null;
       state.attendanceCourseId = willOpen ? cid : null;
       if(willOpen){
         state.attendanceDate = nextSessionDate(state.courses[cid]);
@@ -3807,6 +4163,7 @@ function renderCorsiScreen(host){
         if(!enrollments.length){ attListHost.innerHTML = `<div class="hint">Nessun corsista iscritto.</div>`; }
         const realHours = courseHoursOn(c, state.attendanceDate).length > 0;
         const attDow = new Date(state.attendanceDate+'T00:00:00').getDay();
+        if(realHours) attListHost.before(buildDayTeachersBlock(cid, state.attendanceDate)); // maestro di ogni ora, modificabile per quel giorno
         if(state.isAdmin && realHours){ // pioggia: annulla l'ora per tutti i corsisti (anche in anticipo o a lezione già passata)
           const rh = document.createElement('div'); rh.style.marginTop = '8px';
           attHours.forEach(h=>{
@@ -3884,6 +4241,15 @@ function renderCorsiScreen(host){
           listHost.appendChild(row);
         });
       }
+    }
+  }
+
+  // Pannello maestri per ora (admin o maestro del corso)
+  if(state.teachersCourseId && state.courses[state.teachersCourseId] && state.teachersCourseId===state.selectedCourseId){
+    const cid = state.teachersCourseId;
+    if(state.isAdmin || isTeacherOfCourse(cid)){
+      const detailHost = screen.querySelector('#detail-'+cid);
+      if(detailHost) detailHost.appendChild(buildTeachersPanel(cid));
     }
   }
 
@@ -3967,7 +4333,7 @@ function renderMaestroScreen(host){
 
   const myCourses = Object.entries(state.courses||{}).filter(([_,c])=>c.teacherUid===state.uid || c.teacherUid2===state.uid);
 
-  myCourses.forEach(([cid])=>{ loadCourseEnrollments(cid); loadCourseAttendanceAll(cid); });
+  myCourses.forEach(([cid])=>{ loadCourseEnrollments(cid); loadCourseAttendanceAll(cid); loadTeacherData(cid); });
   Object.keys(state.courses||{}).forEach(id=>loadCourseRecoveries(id));
 
   let weekHours = 0, weekRevenue = 0;
@@ -4100,6 +4466,8 @@ function renderMaestroScreen(host){
     if(pres) chips.push(`<span class="mt-chip ok">${pres} ${pres===1?'presente':'presenti'}</span>`);
     if(abs) chips.push(`<span class="mt-chip no">${abs} ${abs===1?'assente':'assenti'}</span>`);
     if(guests.length) chips.push(`<span class="mt-chip">${guests.length} ${guests.length===1?'recupero':'recuperi'}</span>`);
+    const lessonT = lessonTeacher(s.cid, s.dateStr, s.hour, s.courtId);
+    if(lessonT && lessonT.uid!==state.uid) chips.unshift(`<span class="mt-chip">Maestro: ${esc(teacherName(lessonT))}</span>`);
 
     card.className = 'mt-item cell' + (isOpen ? ' open' : '');
     card.innerHTML = `<div class="mt-head">
@@ -4129,6 +4497,7 @@ function renderMaestroScreen(host){
       } else {
         det.innerHTML = `<div class="hint">Nessuna presenza registrata per ora.</div>`;
       }
+      det.appendChild(buildDayTeachersBlock(s.cid, s.dateStr, { hour:s.hour, courtId:s.courtId }));
       const tog = document.createElement('button');
       tog.className = 'btn-ghost';
       tog.style.cssText = 'width:100%;margin-top:6px;padding:9px;font-size:12px;';
