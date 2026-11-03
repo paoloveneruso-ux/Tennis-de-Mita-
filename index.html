@@ -2742,12 +2742,12 @@ async function setLessonTeacher(cid, date, x, val, scope){
   const t = teacherFromChoice(val);
   const lk = lessonKey(x.hour, x.courtId);
   if(scope === 'from'){
+    await set(ref(db, cpath('courseTeacherPlan/'+cid+'/'+sessionKey(x.weekday, x.hour, x.courtId)+'/'+date)), t ? teacherNode(t) : { reset:true });
     const upd = {};
-    upd['courseTeacherPlan/'+cid+'/'+sessionKey(x.weekday, x.hour, x.courtId)+'/'+date] = t ? teacherNode(t) : { reset:true };
     Object.entries(state.lessonTeachers[cid]||{}).forEach(([d, m])=>{ // i cambi singoli già fissati sui giorni successivi di quest'ora non servono più
-      if(d >= date && m && m[lk] && new Date(d+'T00:00:00').getDay() === x.weekday) upd['courseLessonTeachers/'+cid+'/'+d+'/'+lk] = null;
+      if(d >= date && m && m[lk] && new Date(d+'T00:00:00').getDay() === x.weekday) upd[d+'/'+lk] = null;
     });
-    await update(ref(db, cpath('')), upd);
+    if(Object.keys(upd).length) await update(ref(db, cpath('courseLessonTeachers/'+cid)), upd);
     toast(t ? 'Maestro '+teacherName(t)+' dal '+fmtDateDisplay(date)+' in poi' : 'Maestro predefinito dal '+fmtDateDisplay(date)+' in poi');
   } else {
     const p = ref(db, cpath('courseLessonTeachers/'+cid+'/'+date+'/'+lk));
