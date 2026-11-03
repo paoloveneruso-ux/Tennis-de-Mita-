@@ -4575,8 +4575,8 @@ function renderSuperAdminScreen(host){
         </select>
       </div>
       <div style="display:flex;gap:8px;">
-        <div class="field"><label>Da</label><input id="auditFromInput" type="date" value="${state.auditFrom}"></div>
-        <div class="field"><label>A</label><input id="auditToInput" type="date" value="${state.auditTo}"></div>
+        <div class="field" style="flex:1;min-width:0;"><label>Da</label><input id="auditFromInput" type="date" value="${state.auditFrom}" style="min-width:0;"></div>
+        <div class="field" style="flex:1;min-width:0;"><label>A</label><input id="auditToInput" type="date" value="${state.auditTo}" style="min-width:0;"></div>
       </div>
       ${(state.auditFrom||state.auditTo) ? `<button class="btn-ghost" id="auditClearDates" style="width:100%;margin-top:6px;">Rimuovi filtro data</button>` : ''}
       <div id="auditList" style="margin-top:10px;">${filtered.length ? '' : '<div class="hint">Nessuna azione registrata in questo periodo.</div>'}</div>
