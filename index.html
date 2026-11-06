@@ -699,6 +699,7 @@ const state = {
   paymentMonth: currentYearMonth(),
   draftSessions: [{ weekday: 1, hour: OPEN_HOUR, courtId: null }],
   selectedTeacherUid: '',
+  selectedTeacherXid: '', // maestro non registrato scelto dall'admin per una lezione
   myTeachingBookings: {},
   maestroWeekStart: null,
   maestroDay: null,
@@ -3130,16 +3131,17 @@ async function bookSlot(court, hour, targetInfo){
   const bid = push(ref(db, cpath('bookingsPublic'))).key;
   const isLezione = state.selectedMode === 'lezione';
   const teacherUid = isLezione ? (state.selectedTeacherUid || null) : null;
+  const teacherXid = (isLezione && !teacherUid && state.selectedTeacherXid) ? state.selectedTeacherXid : null;
   const teacher = teacherUid ? state.members[Object.keys(state.members).find(id=>state.members[id].uid===teacherUid)] : null;
-  const teacherName = teacher ? teacher.name : '';
+  const teacherName = teacher ? teacher.name : (teacherXid ? ((state.extraTeachers[teacherXid]||{}).name || '') : '');
   try{
     await set(ref(db, cpath('bookingsPrivate/'+bid)), {
       courtId:court.id, date:state.selectedDate, hour, mode:state.selectedMode,
       rate: state.club.rates[state.selectedMode], memberId: targetInfo.memberId||null, memberName: targetInfo.memberName,
       uid: targetInfo.uid||null, teacherUid, teacherName, createdAt: Date.now()
-    });
+    , ...(teacherXid ? { teacherXid } : {}) });
     if(targetInfo.uid) await set(ref(db, cpath('myBookings/'+targetInfo.uid+'/'+bid)), true);
-    await set(ref(db, cpath('bookingsPublic/'+bid)), { courtId:court.id, date:state.selectedDate, hour, mode:state.selectedMode, teacherUid, teacherName });
+    await set(ref(db, cpath('bookingsPublic/'+bid)), { courtId:court.id, date:state.selectedDate, hour, mode:state.selectedMode, teacherUid, teacherName, ...(teacherXid ? { teacherXid } : {}) });
     if(teacherUid){
       await set(ref(db, cpath('myTeachingBookings/'+teacherUid+'/'+bid)), {
         date: state.selectedDate, hour, courtId: court.id, courtName: court.name,
@@ -3343,7 +3345,7 @@ function renderCourts(host){
       </div>
       ${state.isAdmin ? `<div class="mode-choice" id="modeChoiceAdmin" style="margin-top:8px;">${ADMIN_ONLY_MODES.map(m=>`<button data-mode="${m.id}" class="${state.selectedMode===m.id?'sel':''}">${m.label}<br><span style="opacity:.7;">${modeRateTxt(m.id)} · solo admin</span></button>`).join('')}</div>` : ''}
       ${isAdminOnlyMode(state.selectedMode) ? `<div class="field" style="margin-top:8px;"><label>Nota (facoltativa): gruppo, maestro…</label><input id="satNoteInput" value="${esc(state.satNote)}" placeholder="Es. Gruppo bambini"></div><div class="hint" style="margin-top:6px;">Ora non intestata a un socio: non conta per i punti e non entra nello storico di nessuno.</div>` : ''}
-      ${state.selectedMode==='lezione' ? `<div class="hint" style="margin-top:8px;">Il maestro si sceglie al momento di toccare l'ora libera: vedrai solo quelli disponibili in quello slot.</div>` : ''}
+      ${state.selectedMode==='lezione' ? `<div class="hint" style="margin-top:8px;">${state.isAdmin ? 'Toccando l\'ora libera scegli il maestro (anche non registrato, o aggiungine uno nuovo) e inserisci il nome di chi fa la lezione, obbligatorio.' : "Il maestro si sceglie al momento di toccare l'ora libera: vedrai solo quelli disponibili in quello slot."}</div>` : ''}
     </div>
     <div class="day-strip" id="dayStrip"></div>
     <div id="courtsHost"></div>
@@ -3743,7 +3745,7 @@ function paintMemberLoyalty(overlay, m){
 function getBusyTeacherUidsAt(dateStr, hour){
   const busy = new Set();
   Object.values(state.bookingsPublic||{}).forEach(b=>{
-    if(b.date===dateStr && b.hour===hour && b.mode==='lezione' && b.teacherUid) busy.add(b.teacherUid);
+    if(b.date===dateStr && b.hour===hour && b.mode==='lezione'){ if(b.teacherUid) busy.add(b.teacherUid); if(b.teacherXid) busy.add('x:'+b.teacherXid); }
   });
   Object.values(state.courses||{}).forEach(c=>{
     if(!c.teacherUid && !c.teacherUid2) return;
@@ -3757,14 +3759,28 @@ function getBusyTeacherUidsAt(dateStr, hour){
 
 function openTeacherPickerAndBook(court, hour, label, target){
   const busy = getBusyTeacherUidsAt(state.selectedDate, hour);
-  const available = Object.entries(state.members||{})
+  const isAdm = !!state.isAdmin;
+  const reg = Object.entries(state.members||{})
     .filter(([_,m])=>m.uid && state.teachers[m.uid] && !busy.has(m.uid))
-    .sort((a,b)=>a[1].name.localeCompare(b[1].name));
+    .sort((a,b)=>a[1].name.localeCompare(b[1].name))
+    .map(([id,m])=>({ v:'u:'+m.uid, l:m.name }));
+  // l'admin può scegliere anche maestri non registrati (elenco "Altri maestri") o aggiungerne uno a mano
+  const ext = isAdm ? Object.entries(state.extraTeachers||{}).filter(([id,x])=>x && x.name && !busy.has('x:'+id))
+    .sort((a,b)=>String(a[1].name).localeCompare(String(b[1].name),'it')).map(([id,x])=>({ v:'x:'+id, l:x.name })) : [];
 
-  if(!available.length){
+  if(!reg.length && !ext.length && !isAdm){
     toast('Nessun maestro disponibile in questo slot (già impegnati su un altro campo).');
     return;
   }
+
+  // chi fa la lezione: per l'admin è obbligatorio; precompilato se ha scelto un socio/ospite nel menu "Prenota per"
+  const adminSelf = state.isAdmin && state.bookingForTarget==='__self__';
+  const pupilInit = (isAdm && !adminSelf && target && target.memberName) ? target.memberName : '';
+  const opt = o => '<option value="'+esc(o.v)+'">'+esc(o.l)+'</option>';
+  const teacherOpts = (isAdm ? '<option value="">— scegli il maestro —</option>' : '')
+    + (reg.length ? '<optgroup label="Maestri del circolo">'+reg.map(opt).join('')+'</optgroup>' : '')
+    + (ext.length ? '<optgroup label="Altri maestri">'+ext.map(opt).join('')+'</optgroup>' : '')
+    + (isAdm ? '<option value="__new__">＋ Aggiungi altro maestro…</option>' : '');
 
   document.querySelectorAll('.modal-overlay').forEach(el=>el.remove());
   const overlay = document.createElement('div');
@@ -3772,24 +3788,49 @@ function openTeacherPickerAndBook(court, hour, label, target){
   overlay.innerHTML = `
     <div class="modal">
       <h4>Lezione — ${label} · ${court.name}</h4>
-      <div class="field"><label>Maestro disponibile</label>
-        <select id="pickTeacher">
-          ${available.map(([id,m])=>`<option value="${m.uid}">${m.name}</option>`).join('')}
-        </select>
+      <div class="field"><label>${isAdm ? 'Maestro' : 'Maestro disponibile'}</label>
+        <select id="pickTeacher">${teacherOpts}</select>
       </div>
+      ${isAdm ? `<div class="field"><label>Chi fa la lezione (obbligatorio)</label>
+        <input type="text" id="pickPupil" maxlength="60" placeholder="Nome e cognome dell'allievo" value="${esc(pupilInit)}"></div>` : ''}
       <div class="hint" style="color:var(--clay-text);border:1px solid var(--clay-dim);border-radius:8px;padding:8px;">Ricorda: prima di confermare, contatta privatamente il maestro per assicurarti che sia davvero disponibile in questo orario. La prenotazione qui non lo avvisa automaticamente.</div>
-      <div class="hint">Non sarà annullabile nelle 24 ore precedenti l'orario.</div>
+      ${isAdm ? '' : '<div class="hint">Non sarà annullabile nelle 24 ore precedenti l\'orario.</div>'}
       <div class="btn-row">
         <button class="btn-ghost" id="cancelPick">Annulla</button>
         <button class="btn-primary" id="confirmPick">Conferma prenotazione</button>
       </div>
     </div>`;
   document.body.appendChild(overlay);
+  const sel = overlay.querySelector('#pickTeacher');
+  let prevVal = sel.value;
+  sel.onchange = async () => {
+    if(sel.value !== '__new__'){ prevVal = sel.value; return; }
+    const xid = await addExtraTeacher();
+    if(xid){
+      const o = document.createElement('option'); o.value = 'x:'+xid; o.textContent = state.extraTeachers[xid].name;
+      let g = sel.querySelector('optgroup[label="Altri maestri"]');
+      if(!g){ g = document.createElement('optgroup'); g.label = 'Altri maestri'; sel.insertBefore(g, sel.querySelector('option[value="__new__"]')); }
+      if(!g.querySelector('option[value="'+o.value+'"]')) g.appendChild(o);
+      sel.value = o.value; prevVal = o.value;
+    } else sel.value = prevVal;
+  };
   overlay.querySelector('#cancelPick').onclick = () => overlay.remove();
   overlay.querySelector('#confirmPick').onclick = () => {
-    state.selectedTeacherUid = overlay.querySelector('#pickTeacher').value;
+    const v = sel.value;
+    if(!v || v==='__new__'){ toast('Scegli il maestro'); return; }
+    let t = target;
+    if(isAdm){
+      const pupil = overlay.querySelector('#pickPupil').value.trim().slice(0,60);
+      if(!pupil){ toast('Inserisci il nome di chi fa la lezione'); overlay.querySelector('#pickPupil').focus(); return; }
+      // stesso nome del socio scelto: resta collegato a lui; altrimenti è un allievo "ospite"
+      t = (target && target.memberName===pupil) ? target : { memberId:null, memberName:pupil, uid:null };
+    }
+    if(v.indexOf('x:')===0){
+      const xid = v.slice(2);
+      state.selectedTeacherUid = ''; state.selectedTeacherXid = xid;
+    } else { state.selectedTeacherUid = v.slice(2); state.selectedTeacherXid = ''; }
     overlay.remove();
-    bookSlot(court, hour, target);
+    bookSlot(court, hour, t);
   };
 }
 
@@ -3804,6 +3845,7 @@ function resolveBookingTarget(meObj){
   }
   if(state.bookingForTarget==='__guest__'){
     const name = state.bookingForGuestName.trim();
+    if(!name && state.selectedMode==='lezione') return { memberId:null, memberName:'', uid:null }; // il nome si chiede nella finestra della lezione
     if(!name){ toast('Inserisci il nome dell\'ospite'); return null; }
     return { memberId: null, memberName: name, uid: null };
   }
