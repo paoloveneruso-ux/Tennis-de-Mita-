@@ -3421,7 +3421,7 @@ function renderCourts(host){
         if(state.isAdmin){
           const satLike = r.mode==='sat' || r.mode==='corsi';
           slotEl.innerHTML = `${label}<span class="who nm">${esc(satLike ? (r.mode==='sat'?'SAT':'Corsi') : (shortPersonName(r.memberName)||'fisso'))}</span><span class="mode-tag" style="text-transform:none;">${esc(satLike && r.memberName && r.memberName!=='SAT' && r.memberName!=='Corsi' ? r.memberName : 'fisso')}</span>`;
-          slotEl.title = 'Fisso · '+(r.memberName||'');
+          slotEl.title = 'Fisso · '+(r.memberName||'')+(r.teacherName ? ' · maestro '+r.teacherName : '');
         } else slotEl.innerHTML = `${label}<span class="who">${mineFixed?'tuo fisso':'fisso'}</span>`;
       } else if(bookingEntry){
         const [bid, b] = bookingEntry;
@@ -3878,6 +3878,99 @@ function modeRateTxt(id){
 /* una prenotazione fissa può coprire più ore consecutive (r.hours, default 1): es. SAT dalle 15 alle 19 = hour 15, hours 4 */
 function recHours(r){ return Math.max(1, parseInt(r && r.hours, 10) || 1); }
 function recRangeTxt(r){ return String(r.hour).padStart(2,'0')+':00'+(recHours(r)>1 ? '–'+String(r.hour+recHours(r)).padStart(2,'0')+':00' : ''); }
+/* Modifica di una prenotazione fissa: persona, campo, giorno, ora, durata, modalità, maestro (se lezione), quota oraria e date */
+function openRecurringEditor(rid, r){
+  const courts = state.club.courts || [];
+  const members = Object.entries(state.members||{}).sort((a,b)=>a[1].name.localeCompare(b[1].name));
+  const curTarget = r.memberId && state.members[r.memberId] ? r.memberId : '__guest__';
+  const teacherCur = r.teacherUid ? 'u:'+r.teacherUid : (r.teacherXid ? 'x:'+r.teacherXid : '');
+  const opt = (v,l,sel) => '<option value="'+esc(v)+'"'+(sel?' selected':'')+'>'+esc(l)+'</option>';
+  const reg = Object.keys(state.teachers||{}).filter(u=>state.teachers[u]).map(u=>({ v:'u:'+u, l: memberNameByUid(u) || 'Maestro (senza nome)' })).sort((a,b)=>a.l.localeCompare(b.l,'it'));
+  const ext = Object.entries(state.extraTeachers||{}).filter(([_,x])=>x && x.name).map(([id,x])=>({ v:'x:'+id, l:x.name })).sort((a,b)=>a.l.localeCompare(b.l,'it'));
+  const known = new Set([...reg,...ext].map(o=>o.v));
+  const teacherOpts = opt('','— nessun maestro —',!teacherCur)
+    + (teacherCur && !known.has(teacherCur) ? opt(teacherCur, r.teacherName||'Maestro', true) : '')
+    + (reg.length ? '<optgroup label="Maestri del circolo">'+reg.map(o=>opt(o.v,o.l,o.v===teacherCur)).join('')+'</optgroup>' : '')
+    + (ext.length ? '<optgroup label="Altri maestri">'+ext.map(o=>opt(o.v,o.l,o.v===teacherCur)).join('')+'</optgroup>' : '')
+    + '<option value="__new__">＋ Aggiungi altro maestro…</option>';
+  const rateInit = (typeof r.rate==='number') ? r.rate : (Number((state.club.rates||{})[r.mode])||0);
+  document.querySelectorAll('.modal-overlay').forEach(el=>el.remove());
+  const ov = document.createElement('div'); ov.className = 'modal-overlay';
+  ov.innerHTML = `<div class="modal" style="max-height:90vh;overflow:auto;">
+    <h4>Modifica prenotazione fissa</h4>
+    <div class="field"><label>Per chi</label><select id="reTarget">${opt('__guest__','Nome libero (senza account)',curTarget==='__guest__')}${members.map(([id,m])=>opt(id,m.name,id===curTarget)).join('')}</select></div>
+    <div class="field" id="reNameWrap"><label>Nome</label><input id="reName" maxlength="60" value="${esc(r.memberName||'')}"></div>
+    <div class="field"><label>Campo</label><select id="reCourt">${courts.map(c=>opt(c.id,c.name,c.id===r.courtId)).join('')}</select></div>
+    <div class="field"><label>Giorno</label><select id="reWeekday">${WEEKDAY_FULL.map((w,i)=>opt(String(i),w,i===r.weekday)).join('')}</select></div>
+    <div class="field"><label>Ora</label><select id="reHour">${Array.from({length:CLOSE_HOUR-OPEN_HOUR},(_,i)=>{const h=OPEN_HOUR+i;return opt(String(h),String(h).padStart(2,'0')+':00',h===r.hour);}).join('')}</select></div>
+    <div class="field"><label>Ore consecutive</label><select id="reHours">${[1,2,3,4,5,6].map(n=>opt(String(n),n===1?'1 ora':n+' ore',n===recHours(r))).join('')}</select></div>
+    <div class="field"><label>Modalità</label><select id="reMode">${ALL_MODES.map(m=>opt(m.id,m.label,m.id===r.mode)).join('')}</select></div>
+    <div class="field" id="reTeacherWrap"><label>Maestro (lezione)</label><select id="reTeacher">${teacherOpts}</select></div>
+    <div class="field" id="reRateWrap"><label>Quota pagata (€ per ora)</label><input id="reRate" type="number" min="0" step="0.5" inputmode="decimal" value="${rateInit}"></div>
+    <div class="hint" id="reRateNote" style="display:none;margin-bottom:8px;">SAT e Corsi usano sempre la tariffa attuale (o la quota fissa mensile): qui non si imposta.</div>
+    <div class="field"><label>Data inizio</label><input id="reStart" type="date" value="${esc(r.startDate||'')}"></div>
+    <div class="field"><label>Data fine (opzionale)</label><input id="reEnd" type="date" value="${esc(r.endDate||'')}"></div>
+    <div class="btn-row"><button class="btn-ghost" id="reCancel">Annulla</button><button class="btn-primary" id="reSave">Salva modifiche</button></div>
+  </div>`;
+  document.body.appendChild(ov);
+  const q = id => ov.querySelector('#'+id);
+  const sync = () => {
+    q('reNameWrap').style.display = q('reTarget').value==='__guest__' ? 'flex' : 'none';
+    const m = q('reMode').value;
+    q('reTeacherWrap').style.display = m==='lezione' ? 'flex' : 'none';
+    const ao = isAdminOnlyMode(m);
+    q('reRateWrap').style.display = ao ? 'none' : 'flex'; q('reRateNote').style.display = ao ? 'block' : 'none';
+  };
+  let lastMode = r.mode;
+  q('reTarget').onchange = sync;
+  q('reMode').onchange = () => { // cambiando modalità la quota proposta diventa la tariffa di quella modalità
+    const m = q('reMode').value;
+    if(m !== lastMode){ q('reRate').value = Number((state.club.rates||{})[m])||0; lastMode = m; }
+    sync();
+  };
+  let prevT = q('reTeacher').value;
+  q('reTeacher').onchange = async () => {
+    const sel = q('reTeacher');
+    if(sel.value !== '__new__'){ prevT = sel.value; return; }
+    const xid = await addExtraTeacher();
+    if(xid){
+      const o = document.createElement('option'); o.value = 'x:'+xid; o.textContent = state.extraTeachers[xid].name;
+      sel.insertBefore(o, sel.querySelector('option[value="__new__"]')); sel.value = o.value; prevT = o.value;
+    } else sel.value = prevT;
+  };
+  sync();
+  q('reCancel').onclick = () => ov.remove();
+  q('reSave').onclick = async () => {
+    const targetVal = q('reTarget').value;
+    let memberId = null, memberName = '', uid = null;
+    if(targetVal==='__guest__'){ memberName = q('reName').value.trim(); if(!memberName){ toast('Inserisci il nome'); return; } }
+    else { const m = state.members[targetVal]; if(!m){ toast('Socio non trovato'); return; } memberId = targetVal; memberName = m.name; uid = m.uid||null; }
+    const courtId = q('reCourt').value, weekday = parseInt(q('reWeekday').value,10), hour = parseInt(q('reHour').value,10);
+    const hours = parseInt(q('reHours').value,10) || 1, mode = q('reMode').value;
+    const startDate = q('reStart').value, endDate = q('reEnd').value || null;
+    if(!startDate){ toast('Inserisci la data di inizio'); return; }
+    if(hour + hours > CLOSE_HOUR){ toast('Le ore devono finire entro le '+String(CLOSE_HOUR).padStart(2,'0')+':00'); return; }
+    if(endDate && endDate < startDate){ toast('La data finale è prima di quella iniziale'); return; }
+    let teacherUid = null, teacherXid = null, teacherName = null;
+    if(mode==='lezione'){
+      const tv = q('reTeacher').value;
+      if(!tv || tv==='__new__'){ toast('Scegli il maestro della lezione'); return; }
+      if(tv.indexOf('u:')===0){ teacherUid = tv.slice(2); teacherName = memberNameByUid(teacherUid) || r.teacherName || ''; }
+      else { teacherXid = tv.slice(2); teacherName = (state.extraTeachers[teacherXid]||{}).name || r.teacherName || ''; }
+    }
+    let rate = parseFloat(q('reRate').value);
+    if(isAdminOnlyMode(mode)) rate = Number((state.club.rates||{})[mode])||0;
+    else if(isNaN(rate) || rate < 0){ toast('Quota non valida'); return; }
+    const overlap = Object.entries(state.recurringBookings||{}).find(([oid,o])=> oid!==rid && o.courtId===courtId && o.weekday===weekday
+      && hour < o.hour+recHours(o) && o.hour < hour+hours && (!o.endDate || o.endDate >= startDate) && (!endDate || o.startDate <= endDate));
+    if(overlap && !confirm('Si sovrappone a una prenotazione fissa già presente ('+overlap[1].memberName+', '+recRangeTxt(overlap[1])+').\n\nSalvare comunque?')) return;
+    try{
+      await update(ref(db, cpath('recurringBookings/'+rid)), { memberId, memberName, uid, courtId, weekday, hour, hours, mode, rate, startDate, endDate, teacherUid, teacherXid, teacherName });
+      ov.remove(); toast('Prenotazione fissa aggiornata');
+    }catch(e){ toast('Errore: '+e.message); }
+  };
+}
+
 function recurringCoversSlot(r, courtId, dateStr, hour){
   if(r.courtId!==courtId || r.weekday===undefined || hour < r.hour || hour >= r.hour + recHours(r)) return false;
   const dow = new Date(dateStr+'T00:00:00').getDay();
@@ -5567,7 +5660,12 @@ function renderAdminScreen(host){
   recurringEntries.forEach(([rid,r])=>{
     const court = (state.club.courts||[]).find(c=>c.id===r.courtId);
     const row = document.createElement('div'); row.className='list-row';
-    row.innerHTML = `<span>${WEEKDAY_FULL[r.weekday]} ${recRangeTxt(r)} · ${court?court.name:''} · ${r.memberName} · ${modeLabel(r.mode)}${r.endDate?(' · fino al '+fmtDateDisplay(r.endDate)):''}</span>`;
+    const rateTxt = (r.mode && !isAdminOnlyMode(r.mode) && typeof r.rate==='number') ? ' · € '+r.rate+'/h' : '';
+    row.style.cssText = 'flex-wrap:wrap;gap:4px 8px;';
+    row.innerHTML = `<span>${esc(WEEKDAY_FULL[r.weekday])} ${recRangeTxt(r)} · ${esc(court?court.name:'')} · ${esc(r.memberName)} · ${esc(modeLabel(r.mode))}${r.teacherName?' · '+esc(r.teacherName):''}${esc(rateTxt)}${r.endDate?(' · fino al '+esc(fmtDateDisplay(r.endDate))):''}</span>`;
+    const edit = document.createElement('button'); edit.type='button'; edit.className='small-btn'; edit.textContent='Modifica';
+    edit.onclick = () => openRecurringEditor(rid, r);
+    row.appendChild(edit);
     const del = document.createElement('button'); del.className='small-btn'; del.textContent='Rimuovi';
     del.onclick = async () => {
       if(confirm('Rimuovere la prenotazione fissa di '+r.memberName+'?')){
