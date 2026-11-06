@@ -80,6 +80,9 @@
   .slot{min-width:0;overflow:hidden;}
   .slot.blocked .who{display:block;font-size:9px;margin-top:2px;opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
   .slot .who{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .slot .who.nm{font-size:10px;opacity:1;font-weight:600;}
+  .slot.taken .who.nm{color:var(--chalk);}
+  .slot .mode-tag{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   /* calendario settimanale del corsista */
   .wk-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;}
   .wk-title{font-family:var(--font-display);font-size:22px;letter-spacing:.02em;color:var(--chalk);line-height:1.1;}
@@ -300,6 +303,41 @@ const ADMIN_ONLY_MODES = [
 ];
 const ALL_MODES = [...MODES, ...ADMIN_ONLY_MODES];
 const modeLabel = id => (ALL_MODES.find(m=>m.id===id)||{}).label || id;
+
+const isAdminOnlyMode = id => ADMIN_ONLY_MODES.some(m=>m.id===id);
+
+/* ================= Raccolta punti: attivazione =================
+   info.loyaltyEnabled (true/false) e info.loyaltyStartDate ("YYYY-MM-DD", facoltativa).
+   Disattivata (o senza impostazione): i soci non vedono punti, conferma compagno e storico.
+   Attiva con data di partenza: dal giorno indicato compare la raccolta e contano solo le ore giocate da quel giorno. */
+function loyaltyConfig(){ const c = state.club || {}; return { enabled: c.loyaltyEnabled === true, start: c.loyaltyStartDate || '' }; }
+function loyaltyActive(){ const c = loyaltyConfig(); return c.enabled && (!c.start || todayKey() >= c.start); }
+function loyaltyCountsOn(dateStr){ const c = loyaltyConfig(); return c.enabled && (!c.start || dateStr >= c.start); }
+
+/* ================= Chiusure ricorrenti del circolo =================
+   recurringClosures/{id} = { weekday, startHour, endHour (esclusa), courtId (vuoto = tutti), label, startDate, endDate } */
+function closureEntryFor(courtId, date, hour){
+  const dow = new Date(date+'T00:00:00').getDay();
+  return Object.entries(state.recurringClosures||{}).find(([_,c])=> c && c.weekday===dow && hour>=c.startHour && hour<c.endHour
+    && (!c.courtId || c.courtId===courtId) && (!c.startDate || date>=c.startDate) && (!c.endDate || date<=c.endDate));
+}
+
+/* ================= Chi ha prenotato (vista admin nella griglia dei campi) ================= */
+function shortPersonName(n){
+  const p = String(n||'').trim().split(/\s+/).filter(Boolean);
+  if(p.length < 2) return p[0] || '';
+  return p[0]+' '+p[p.length-1].charAt(0).toUpperCase()+'.';
+}
+function adminSlotWho(bid, b){
+  const pv = (state.bookingsPrivate||{})[bid] || {};
+  const full = pv.memberName || '';
+  if(b.mode === 'lezione') return { who: shortPersonName(b.teacherName) || 'Maestro', tag: shortPersonName(full), title: 'Lezione · maestro '+(b.teacherName||'?')+(full ? ' · '+full : '') };
+  if(b.mode === 'sat' || b.mode === 'corsi'){
+    const rest = full.indexOf(' · ') >= 0 ? full.slice(full.indexOf(' · ')+3) : '';
+    return { who: b.mode==='sat' ? 'SAT' : 'Corsi', tag: rest, title: modeLabel(b.mode)+(rest ? ' · '+rest : '') };
+  }
+  return { who: shortPersonName(full) || 'Occupato', tag: '', title: (full || 'Occupato')+' · '+modeLabel(b.mode) };
+}
 
 const MIN_CANCEL_HOURS = 24;
 const MAX_ADVANCE_DAYS = 7;
@@ -677,6 +715,8 @@ const state = {
   loyaltyRedemptions: {},
   loyaltyAllConfirmed: {}, // popolato solo per admin (scansione fedeltà)
   confirmPartnerBid: null,
+  recurringClosures: {}, // chiusure ricorrenti settimanali
+  satNote: '', showLoyaltyHistory: false,
   draftLoyaltyBands: null,
   adminLoyaltyScan: {}, // { [uid]: { confirmedCounts:{bandId:n}, redemptions:{bandId:n} } }
 };
@@ -2498,6 +2538,7 @@ function attachListeners(){
   onValue(ref(db, cpath('bookingsPublic')), s=>{ state.bookingsPublic = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('blocks')), s=>{ state.blocks = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('halfShifts')), s=>{ state.halfShifts = s.val()||{}; renderCurrent(); }, err=>console.error('halfShifts', err)); // se le regole non lo permettono l'app funziona come prima
+  onValue(ref(db, cpath('recurringClosures')), s=>{ state.recurringClosures = s.val()||{}; renderCurrent(); }, err=>console.error('recurringClosures', err));
   onValue(ref(db, cpath('myBookings/'+state.uid)), s=>{ state.myBookingIds = s.val()||{}; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('teachers')), s=>{ state.teachers = s.val()||{}; state.isTeacher = !!state.teachers[state.uid]; renderCurrent(); }, showFatalError);
   onValue(ref(db, cpath('extraTeachers')), s=>{ state.extraTeachers = s.val()||{}; renderCurrent(); }, err=>console.error('extraTeachers', err));
@@ -3147,7 +3188,8 @@ function slotTakenAnyHere(courtId, date, hour){ // prenotazione, chiusura, corso
   return Object.values(state.bookingsPublic||{}).some(b=>b.courtId===courtId && b.date===date && b.hour===hour)
     || Object.values(state.blocks||{}).some(b=>b.courtId===courtId && b.date===date && b.hour===hour)
     || Object.values(state.courses||{}).some(c=>courseCoversSlot(c, courtId, date, hour))
-    || Object.values(state.recurringBookings||{}).some(r=>recurringCoversSlot(r, courtId, date, hour));
+    || Object.values(state.recurringBookings||{}).some(r=>recurringCoversSlot(r, courtId, date, hour))
+    || !!closureEntryFor(courtId, date, hour);
 }
 function halfShiftRuns(courtId, date){ // serie di ore consecutive spostate: [{from,to}]
   const runs = [];
@@ -3167,7 +3209,8 @@ async function applyHalfShift(courtId, date, from, count){
   const bad = hours.find(h=>
     Object.values(state.blocks||{}).some(b=>b.courtId===courtId && b.date===date && b.hour===h)
     || Object.values(state.courses||{}).some(c=>courseCoversSlot(c, courtId, date, h))
-    || Object.values(state.recurringBookings||{}).some(r=>recurringCoversSlot(r, courtId, date, h)));
+    || Object.values(state.recurringBookings||{}).some(r=>recurringCoversSlot(r, courtId, date, h))
+    || !!closureEntryFor(courtId, date, h));
   if(bad!==undefined){ toast('Le '+hmFmt(bad)+' sono chiuse, di un corso o fisse: non si spostano da qui'); return false; }
   // l'ora subito dopo la serie (compresa quella già spostata) perde la prima mezz'ora: deve essere libera
   const all = new Set(hours); for(let h=OPEN_HOUR; h<CLOSE_HOUR; h++) if(isHalfShifted(courtId, date, h)) all.add(h);
@@ -3228,6 +3271,7 @@ function renderAdminDayPlan(host){ // solo admin: ore del giorno per campo, con 
       const courseEntry = Object.entries(state.courses||{}).find(([_,c])=>courseCoversSlot(c, court.id, date, h));
       const recEntry = Object.entries(state.recurringBookings||{}).find(([_,r])=>recurringCoversSlot(r, court.id, date, h));
       const bookEntry = Object.entries(state.bookingsPublic||{}).find(([_,b])=>b.courtId===court.id && b.date===date && b.hour===h);
+      const cloEntry = closureEntryFor(court.id, date, h);
       let kind, label;
       if(blockEntry){ kind = 'block'; label = 'Chiuso'; }
       else if(courseEntry){ kind = 'course:'+courseEntry[0]; label = 'Corso · '+(courseEntry[1].name||''); }
@@ -3236,7 +3280,8 @@ function renderAdminDayPlan(host){ // solo admin: ore del giorno per campo, con 
         const [bid, b] = bookEntry; const pv = (state.bookingsPrivate||{})[bid] || {};
         kind = 'bk:'+(pv.memberName||'')+'|'+b.mode+'|'+(b.teacherName||'');
         label = (pv.memberName||'Occupato')+' · '+modeLabel(b.mode)+(b.teacherName?' · '+b.teacherName:'');
-      } else continue;
+      } else if(cloEntry){ kind = 'clo:'+cloEntry[0]; label = 'Chiuso'+(cloEntry[1].label ? ' · '+cloEntry[1].label : ' (ricorrente)'); }
+      else continue;
       items.push({ startMin, endMin:startMin+60, kind, label, shifted, hours:1 });
     }
     const rows = [];
@@ -3264,6 +3309,7 @@ function renderAdminDayPlan(host){ // solo admin: ore del giorno per campo, con 
 /* ================= Vista Campi ================= */
 function renderCourts(host){
   const meObj = state.members[state.me] || {name:'Socio'};
+  if(!state.isAdmin && isAdminOnlyMode(state.selectedMode)) state.selectedMode = 'normale';
   const now = new Date();
   const maxBookable = new Date(now.getTime() + MAX_ADVANCE_DAYS*24*3600*1000);
   const days = Array.from({length:MAX_ADVANCE_DAYS+1}, (_,i)=>{ const d = new Date(); d.setDate(d.getDate()+i); return d; });
@@ -3280,7 +3326,7 @@ function renderCourts(host){
       <div class="num">${myHoursToday}h</div>
     </div>
     <div id="shiftReminderHost"></div>
-    ${state.isAdmin ? `
+    ${state.isAdmin && !isAdminOnlyMode(state.selectedMode) ? `
     <div class="card" style="padding:12px 14px;">
       <div class="section-title" style="margin-bottom:8px;">Prenoti per</div>
       <select id="bookForSelect">
@@ -3295,6 +3341,8 @@ function renderCourts(host){
       <div class="mode-choice" id="modeChoice">
         ${MODES.map(m=>`<button data-mode="${m.id}" class="${state.selectedMode===m.id?'sel':''}">${m.label}${state.isAdmin?`<br><span style="opacity:.7;">€ ${state.club.rates[m.id]}/h</span>`:''}</button>`).join('')}
       </div>
+      ${state.isAdmin ? `<div class="mode-choice" id="modeChoiceAdmin" style="margin-top:8px;">${ADMIN_ONLY_MODES.map(m=>`<button data-mode="${m.id}" class="${state.selectedMode===m.id?'sel':''}">${m.label}<br><span style="opacity:.7;">€ ${state.club.rates[m.id]}/h · solo admin</span></button>`).join('')}</div>` : ''}
+      ${isAdminOnlyMode(state.selectedMode) ? `<div class="field" style="margin-top:8px;"><label>Nota (facoltativa): gruppo, maestro…</label><input id="satNoteInput" value="${esc(state.satNote)}" placeholder="Es. Gruppo bambini"></div><div class="hint" style="margin-top:6px;">Ora non intestata a un socio: non conta per i punti e non entra nello storico di nessuno.</div>` : ''}
       ${state.selectedMode==='lezione' ? `<div class="hint" style="margin-top:8px;">Il maestro si sceglie al momento di toccare l'ora libera: vedrai solo quelli disponibili in quello slot.</div>` : ''}
     </div>
     <div class="day-strip" id="dayStrip"></div>
@@ -3304,13 +3352,15 @@ function renderCourts(host){
   `;
   host.replaceChildren(screen);
 
-  if(state.isAdmin){
+  const satNoteEl = screen.querySelector('#satNoteInput');
+  if(satNoteEl) satNoteEl.oninput = (e)=>{ state.satNote = e.target.value; };
+  if(state.isAdmin && screen.querySelector('#bookForSelect')){
     screen.querySelector('#bookForSelect').onchange = (e)=>{ state.bookingForTarget = e.target.value; renderApp(); };
     const guestInput = screen.querySelector('#bookForGuestName');
     if(guestInput) guestInput.oninput = (e)=>{ state.bookingForGuestName = e.target.value; };
   }
 
-  screen.querySelector('#modeChoice').querySelectorAll('button').forEach(b=>{
+  screen.querySelectorAll('#modeChoice button, #modeChoiceAdmin button').forEach(b=>{
     b.onclick = () => { state.selectedMode = b.dataset.mode; renderApp(); };
   });
 
@@ -3366,16 +3416,25 @@ function renderCourts(host){
         const [,r] = recurringEntry;
         const mineFixed = r.uid === state.uid;
         slotEl.className = 'slot ' + (mineFixed ? 'mine' : 'taken');
-        slotEl.innerHTML = `${label}<span class="who">${mineFixed?'tuo fisso':'fisso'}</span>`;
-        if(state.isAdmin) slotEl.title = r.memberName;
+        if(state.isAdmin){
+          slotEl.innerHTML = `${label}<span class="who nm">${esc(shortPersonName(r.memberName)||'fisso')}</span><span class="mode-tag">fisso</span>`;
+          slotEl.title = 'Fisso · '+(r.memberName||'');
+        } else slotEl.innerHTML = `${label}<span class="who">${mineFixed?'tuo fisso':'fisso'}</span>`;
       } else if(bookingEntry){
         const [bid, b] = bookingEntry;
         const mine = !!state.myBookingIds[bid];
         const showShift = shiftedHere && (mine || state.isAdmin); // l'orario spostato lo vedono solo l'admin e chi ha prenotato
         slotEl.className = 'slot ' + (mine ? 'mine' : 'taken') + (isPast?' past':'');
-        const modeTag = `<span class="mode-tag">${b.mode||''}${b.mode==='lezione'&&b.teacherName?' · '+b.teacherName:''}${showShift?' · +30′':''}</span>`;
-        slotEl.innerHTML = `${showShift ? hmFmt(h,true) : label}<span class="who">${mine?'tu':'occupato'}</span>${modeTag}`;
-        if(showShift) slotEl.title = slotRange(court.id, state.selectedDate, h);
+        if(state.isAdmin){ // l'admin vede chi ha prenotato (maestro per le lezioni, socio per singolo/doppio), non il tipo di ora
+          const aw = adminSlotWho(bid, b);
+          const tagTxt = (aw.tag||'')+(showShift ? (aw.tag?' ':'')+'+30′' : '');
+          slotEl.innerHTML = `${showShift ? hmFmt(h,true) : label}<span class="who nm">${esc(aw.who)}</span>${tagTxt ? `<span class="mode-tag" style="text-transform:none;">${esc(tagTxt)}</span>` : ''}`;
+          slotEl.title = aw.title+(showShift ? ' · '+slotRange(court.id, state.selectedDate, h) : '');
+        } else {
+          const modeTag = `<span class="mode-tag">${b.mode||''}${b.mode==='lezione'&&b.teacherName?' · '+b.teacherName:''}${showShift?' · +30′':''}</span>`;
+          slotEl.innerHTML = `${showShift ? hmFmt(h,true) : label}<span class="who">${mine?'tu':'occupato'}</span>${modeTag}`;
+          if(showShift) slotEl.title = slotRange(court.id, state.selectedDate, h);
+        }
         if(mine && !isPast){
           const hoursUntil = (thisSlotTime - now)/3600000;
           const canCancel = hoursUntil >= MIN_CANCEL_HOURS;
@@ -3390,6 +3449,11 @@ function renderCourts(host){
             }
           };
         }
+      } else if(closureEntryFor(court.id, state.selectedDate, h)){ // chiusura ricorrente del circolo
+        const [,clo] = closureEntryFor(court.id, state.selectedDate, h);
+        slotEl.className = 'slot blocked' + (isPast?' past':'');
+        slotEl.innerHTML = `${label}<span class="who">chiuso</span>`;
+        if(state.isAdmin) slotEl.title = 'Chiusura ricorrente'+(clo.label ? ': '+clo.label : '');
       } else if(afterRun){ // prima mezz'ora occupata dall'ora precedente spostata: per i soci è chiuso, l'admin vede il perché
         slotEl.className = 'slot blocked' + (isPast?' past':'');
         slotEl.innerHTML = `${label}<span class="who">${state.isAdmin ? 'dalle '+hmFmt(h,true) : 'chiuso'}</span>`;
@@ -3409,7 +3473,9 @@ function renderCourts(host){
           if(state.selectedMode==='lezione'){
             openTeacherPickerAndBook(court, h, label, target);
           } else {
-            const confirmMsg = 'Confermi la prenotazione delle '+label+' su '+court.name+' ('+modeLabel(state.selectedMode)+(target.uid!==state.uid?' per '+target.memberName:'')+')?\n\nRicorda: non sarà annullabile nelle 24 ore precedenti l\'orario.'+(shiftedHere ? '\n\nNota: quest\'ora è stata spostata dal circolo e andrà dalle '+hmFmt(h,true)+' alle '+hmFmt(h+1,true)+'.' : '');
+            const adminOnly = isAdminOnlyMode(state.selectedMode);
+            const noteTxt = adminOnly && target.memberName.indexOf(' · ')>=0 ? ' — '+target.memberName.split(' · ').slice(1).join(' · ') : '';
+            const confirmMsg = 'Confermi la prenotazione delle '+label+' su '+court.name+' ('+modeLabel(state.selectedMode)+(adminOnly ? noteTxt : (target.uid!==state.uid?' per '+target.memberName:''))+')?'+(adminOnly ? '' : '\n\nRicorda: non sarà annullabile nelle 24 ore precedenti l\'orario.')+(shiftedHere ? '\n\nNota: quest\'ora è stata spostata dal circolo e andrà dalle '+hmFmt(h,true)+' alle '+hmFmt(h+1,true)+'.' : '');
             if(confirm(confirmMsg)) bookSlot(court, h, target);
           }
         };
@@ -3453,22 +3519,68 @@ function loyaltyBarHtml(p){
     </div>`;
 }
 
-function renderLoyaltySection(host, meObj){
+/* stato di un'ora giocata nello storico punti */
+function loyaltyEntryStatus(entry){
+  if(!entry) return { key:'pending', label:'Da confermare' };
+  if(entry.dismissed) return { key:'none', label:'Senza punti' };
+  if(!entry.band) return { key:'out', label:'Fuori fascia' };
+  const band = getLoyaltyBands().find(b=>b.id===entry.band);
+  return { key:'ok', label:'Punto'+(band ? ' · '+band.label : '') };
+}
+/* ore di singolo/doppio già giocate (+ ore accreditate come compagno), con il loro stato. bookings: [{bid,date,hour,courtId,mode}] */
+function loyaltyHistoryRows(bookings, confirmedMap){
   const now = new Date();
-  // Trova le mie prenotazioni passate (non lezione, non ancora confermate) da proporre per la conferma compagno
+  const conf = confirmedMap || {};
+  const rows = {};
+  (bookings||[]).forEach(b=>{
+    if(!b || (b.mode!=='normale' && b.mode!=='doppio')) return;
+    if(!(slotDateTime(b.date, b.hour) < now)) return;
+    if(!loyaltyCountsOn(b.date) && !conf[b.bid]) return;
+    rows[b.bid] = { bid:b.bid, date:b.date, hour:b.hour, courtId:b.courtId, mode:b.mode, own:true };
+  });
+  Object.entries(conf).forEach(([bid, e])=>{
+    if(!e || !e.date || rows[bid]) return;
+    rows[bid] = { bid, date:e.date, hour:e.hour, courtId:e.courtId, mode:e.mode, own:false }; // ora accreditata perché compagno di un altro socio
+  });
+  return Object.values(rows).map(r=>{ r.entry = conf[r.bid] || null; r.status = loyaltyEntryStatus(r.entry); return r; })
+    .sort((a,b)=> slotDateTime(b.date, b.hour) - slotDateTime(a.date, a.hour));
+}
+function loyaltyRowLine(r){
+  const court = ((state.club.courts||[]).find(c=>c.id===r.courtId)||{}).name || r.courtId || '';
+  const partners = r.entry && Array.isArray(r.entry.partners) && r.entry.partners.length ? ' · con '+r.entry.partners.map(p=>p.name).filter(Boolean).join(', ') : '';
+  return fmtDateDisplay(r.date)+' · '+String(r.hour).padStart(2,'0')+':00 · '+court+' · '+modeLabel(r.mode||'normale')+partners+(r.own ? '' : ' · come compagno');
+}
+
+function renderLoyaltySection(host, meObj){
+  const cfg = loyaltyConfig();
+  if(!cfg.enabled){ host.replaceChildren(); return; } // raccolta punti non attiva: i soci non vedono nulla
+  if(!loyaltyActive()){
+    const soon = document.createElement('div');
+    soon.className = 'card';
+    soon.innerHTML = `<div class="section-title">Raccolta punti — in arrivo</div>
+      <div class="hint">Dal ${esc(fmtDateDisplay(cfg.start))} le ore di singolo e doppio giocate con un compagno matureranno ore di campo gratis. Le ore giocate prima di quella data non contano: nel frattempo usa l'app per prenotare.</div>`;
+    host.replaceChildren(soon);
+    return;
+  }
+  const now = new Date();
+  // Mie ore passate di singolo/doppio non ancora confermate né escluse
   const toConfirm = Object.keys(state.myBookingIds||{})
     .map(bid => ({ bid, b: state.bookingsPublic[bid] }))
-    .filter(({bid,b}) => b && b.mode!=='lezione' && slotDateTime(b.date,b.hour) < now && !state.myLoyaltyConfirmed[bid])
+    .filter(({bid,b}) => b && (b.mode==='normale' || b.mode==='doppio') && loyaltyCountsOn(b.date) && slotDateTime(b.date,b.hour) < now && !state.myLoyaltyConfirmed[bid])
     .sort((a,b)=> slotDateTime(b.b.date,b.b.hour) - slotDateTime(a.b.date,a.b.hour))
     .slice(0, 10);
+  const myBookings = Object.keys(state.myBookingIds||{}).map(bid=>{ const b = state.bookingsPublic[bid]; return b ? Object.assign({ bid }, b) : null; }).filter(Boolean);
+  const history = loyaltyHistoryRows(myBookings, state.myLoyaltyConfirmed);
 
   const card = document.createElement('div');
   card.className = 'card';
   card.innerHTML = `
     <div class="section-title">Raccolta punti — ore verso un campo gratis</div>
-    <div class="hint" style="margin-bottom:10px;">Conta solo il gioco singolo/doppio confermato con un compagno, dopo che l'ora si è svolta. Corsi e lezioni con il maestro non contano.</div>
+    <div class="hint" style="margin-bottom:10px;">Conta solo il gioco singolo/doppio confermato con un compagno, dopo che l'ora si è svolta. Corsi e lezioni con il maestro non contano.${cfg.start ? ' Valgono le ore giocate dal '+esc(fmtDateDisplay(cfg.start))+'.' : ''}</div>
     <div id="loyaltyBars"></div>
-    ${toConfirm.length ? `<div class="section-title" style="margin-top:14px;">Conferma il compagno di gioco</div><div id="toConfirmList"></div>` : ''}
+    ${toConfirm.length ? `<div class="section-title" style="margin-top:14px;">Conferma il compagno di gioco</div><div class="hint" style="margin-bottom:8px;">Se hai giocato da solo o non vuoi i punti per un'ora, scegli "Nessun compagno": l'ora esce da questa lista e resta nello storico senza punti.</div><div id="toConfirmList"></div>` : ''}
+    <button class="btn-ghost" id="loyHistBtn" style="width:100%;margin-top:10px;">${state.showLoyaltyHistory ? 'Nascondi' : 'Mostra'} lo storico delle ore giocate (${history.length})</button>
+    <div id="loyHistHost"></div>
   `;
   host.replaceChildren(card);
 
@@ -3477,6 +3589,20 @@ function renderLoyaltySection(host, meObj){
   progress.forEach(p=>{
     barsHost.insertAdjacentHTML('beforeend', loyaltyBarHtml(p));
   });
+
+  card.querySelector('#loyHistBtn').onclick = () => { state.showLoyaltyHistory = !state.showLoyaltyHistory; renderApp(); };
+  if(state.showLoyaltyHistory){
+    const hh = card.querySelector('#loyHistHost');
+    if(!history.length) hh.innerHTML = `<div class="hint" style="margin-top:8px;">Nessuna ora giocata registrata.</div>`;
+    history.slice(0, 60).forEach(r=>{
+      const row = document.createElement('div');
+      row.className = 'list-row';
+      row.style.cssText = 'flex-wrap:wrap;gap:4px 8px;';
+      row.innerHTML = `<span class="hint" style="color:var(--ink);min-width:0;">${esc(loyaltyRowLine(r))}</span><span class="pill${r.status.key==='pending'?' rain':''}">${esc(r.status.label)}</span>`;
+      hh.appendChild(row);
+    });
+    if(history.length > 60) hh.insertAdjacentHTML('beforeend', `<div class="hint" style="margin-top:6px;">Mostrate le ultime 60 ore.</div>`);
+  }
 
   if(toConfirm.length){
     const listHost = card.querySelector('#toConfirmList');
@@ -3502,6 +3628,7 @@ function renderLoyaltySection(host, meObj){
         <div class="hint" style="margin-bottom:8px;">${fmtDateDisplay(b.date)} · ${String(b.hour).padStart(2,'0')}:00 · ${court?court.name:''} · ${modeLabel(b.mode)}</div>
         ${Array.from({length:numSlots},(_,i)=>slotHtml(i)).join('')}
         <button class="btn-primary confirmBtn" style="width:100%;margin-top:10px;">Conferma</button>
+        <button class="btn-ghost noPartnerBtn" style="width:100%;margin-top:6px;">Nessun compagno — non contare quest'ora</button>
       `;
       listHost.appendChild(row);
 
@@ -3511,6 +3638,16 @@ function renderLoyaltySection(host, meObj){
           extWrap.style.display = sel.value==='__external__' ? 'block' : 'none';
         };
       });
+
+      row.querySelector('.noPartnerBtn').onclick = async () => {
+        if(!confirm('Non contare quest\'ora per la raccolta punti?\n\nResterà nello storico come "senza punti". Per cambiarla dopo dovrai chiedere all\'admin.')) return;
+        try{
+          await set(ref(db, cpath('loyaltyConfirmedBookings/'+state.uid+'/'+bid)), {
+            band: null, dismissed: true, date: b.date, hour: b.hour, courtId: b.courtId, mode: b.mode, confirmedAt: Date.now()
+          });
+          toast('Ora registrata senza punti');
+        }catch(e){ toast('Errore: '+e.message); }
+      };
 
       row.querySelector('.confirmBtn').onclick = async () => {
         const partners = [];
@@ -3530,7 +3667,7 @@ function renderLoyaltySection(host, meObj){
             partners.push({ partnerName: m.name||'', partnerMemberId: val, partnerUid: m.uid||null });
           }
         }
-        if(!partners.length){ toast('Scegli almeno un compagno di gioco'); return; }
+        if(!partners.length){ toast('Scegli almeno un compagno di gioco, oppure "Nessun compagno"'); return; }
 
         const band = findLoyaltyBand(b.date, b.hour);
         const baseEntry = {
@@ -3557,6 +3694,49 @@ function renderLoyaltySection(host, meObj){
       };
     });
   }
+}
+
+/* Admin: ore giocate di un socio con gestione dei punti ora per ora (dentro la scheda del socio) */
+function paintMemberLoyalty(overlay, m){
+  const host = overlay.querySelector('#memberLoyaltyHost');
+  if(!host) return;
+  const scan = state.adminLoyaltyScan[m.uid];
+  if(!scan || scan.confirmed===undefined || scan.redemptions===undefined) return;
+  const bookings = Object.entries(state.bookingsPrivate||{}).filter(([_,b])=>b && b.uid===m.uid).map(([bid,b])=>Object.assign({ bid }, b));
+  const rows = loyaltyHistoryRows(bookings, scan.confirmed);
+  const sig = JSON.stringify([rows.map(r=>[r.bid, r.status.key, r.entry && r.entry.band]), scan.redemptions, loyaltyConfig()]);
+  if(host._sig === sig) return;
+  host._sig = sig;
+  const progress = computeLoyaltyProgress(scan.confirmed, scan.redemptions);
+  host.innerHTML = (loyaltyConfig().enabled ? '' : '<div class="hint" style="margin-bottom:6px;">La raccolta punti è disattivata per i soci: qui resta gestibile.</div>')
+    + progress.map(loyaltyBarHtml).join('')
+    + '<div class="hint" style="margin:4px 0 6px;"><b style="color:var(--chalk);">Ore giocate (singolo/doppio)</b> — i punti si gestiscono ora per ora, solo per questo socio.</div>'
+    + '<div id="loyRows" style="max-height:260px;overflow:auto;"></div>';
+  const list = host.querySelector('#loyRows');
+  if(!rows.length){ list.innerHTML = '<div class="hint">Nessuna ora giocata registrata.</div>'; return; }
+  rows.slice(0, 60).forEach(r=>{
+    const row = document.createElement('div');
+    row.style.cssText = 'border-bottom:1px solid var(--line);padding:6px 0;';
+    row.innerHTML = `<div class="hint" style="color:var(--ink);">${esc(loyaltyRowLine(r))}</div><div class="loyAct" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:4px;"><span class="pill${r.status.key==='pending'?' rain':''}">${esc(r.status.label)}</span></div>`;
+    const bar = row.querySelector('.loyAct');
+    const mk = (txt, fn) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'small-btn'; b.textContent = txt;
+      b.onclick = async () => { b.disabled = true; try{ await fn(); }catch(e){ toast('Errore: '+e.message); b.disabled = false; } };
+      bar.appendChild(b);
+    };
+    const path = ref(db, cpath('loyaltyConfirmedBookings/'+m.uid+'/'+r.bid));
+    const base = { date:r.date, hour:r.hour, courtId:r.courtId, mode:r.mode, confirmedAt:Date.now(), byAdmin:true };
+    if(r.status.key !== 'ok') mk('Dai punto', async()=>{
+      const band = findLoyaltyBand(r.date, r.hour);
+      if(!band) throw new Error('quest\'ora è fuori dalle fasce');
+      await set(path, Object.assign({}, (r.entry && r.entry.partners) ? { partners:r.entry.partners } : {}, base, { band:band.id }));
+      toast('Punto assegnato');
+    });
+    if(r.status.key !== 'none') mk('Senza punti', async()=>{ await set(path, Object.assign({}, base, { band:null, dismissed:true })); toast('Ora segnata senza punti'); });
+    if(r.status.key !== 'pending') mk(r.own ? 'Da confermare' : 'Rimuovi', async()=>{ await remove(path); toast(r.own ? 'Tornata da confermare' : 'Ora rimossa'); });
+    list.appendChild(row);
+  });
 }
 
 function getBusyTeacherUidsAt(dateStr, hour){
@@ -3613,6 +3793,11 @@ function openTeacherPickerAndBook(court, hour, label, target){
 }
 
 function resolveBookingTarget(meObj){
+  if(state.isAdmin && isAdminOnlyMode(state.selectedMode)){ // SAT / corsi: ora della scuola, non di un socio
+    const base = state.selectedMode==='sat' ? 'SAT' : 'Corsi';
+    const note = (state.satNote||'').trim().slice(0,60);
+    return { memberId:null, memberName: base+(note ? ' · '+note : ''), uid:null };
+  }
   if(!state.isAdmin || state.bookingForTarget==='__self__'){
     return { memberId: state.me, memberName: meObj.name, uid: state.uid };
   }
@@ -4751,13 +4936,11 @@ function renderMemberDetailModal(m){
       }
     }
     const loyaltyScan = state.adminLoyaltyScan[m.uid];
-    if(loyaltyScan && loyaltyScan.confirmed!==undefined && loyaltyScan.redemptions!==undefined){
-      const progress = computeLoyaltyProgress(loyaltyScan.confirmed, loyaltyScan.redemptions);
-      overlay.querySelector('#memberLoyaltyHost').innerHTML = progress.map(loyaltyBarHtml).join('');
-    }
+    paintMemberLoyalty(overlay, m);
     return scan!==undefined && debtTotal!==undefined && loyaltyScan && loyaltyScan.confirmed!==undefined && loyaltyScan.redemptions!==undefined;
   }
 
+  const loyTimer = setInterval(()=>{ if(!document.body.contains(overlay)){ clearInterval(loyTimer); return; } paintMemberLoyalty(overlay, m); }, 800); // aggiorna le ore giocate dopo ogni modifica
   if(!refreshReadOnly()){
     let ticks = 0;
     const interval = setInterval(()=>{
@@ -4952,6 +5135,20 @@ function renderAdminScreen(host){
     </div>
 
     <div class="card">
+      <div class="section-title">Chiusure ricorrenti del circolo</div>
+      <div class="hint" style="margin-bottom:8px;">Fasce chiuse che si ripetono ogni settimana (es. domenica 13:00–17:00): i soci non possono prenotare. Le prenotazioni già presenti restano valide e vanno annullate a mano.</div>
+      <div id="closureList"></div>
+      <div class="field" style="margin-top:8px;"><label>Giorno</label><select id="cloWeekday">${[1,2,3,4,5,6,0].map(i=>`<option value="${i}" ${i===0?'selected':''}>${WEEKDAY_FULL[i]}</option>`).join('')}</select></div>
+      <div class="field"><label>Dalle</label><select id="cloFrom">${Array.from({length:CLOSE_HOUR-OPEN_HOUR},(_,i)=>{const h=OPEN_HOUR+i;return `<option value="${h}" ${h===13?'selected':''}>${String(h).padStart(2,'0')}:00</option>`;}).join('')}</select></div>
+      <div class="field"><label>Alle</label><select id="cloTo">${Array.from({length:CLOSE_HOUR-OPEN_HOUR},(_,i)=>{const h=OPEN_HOUR+1+i;return `<option value="${h}" ${h===17?'selected':''}>${String(h).padStart(2,'0')}:00</option>`;}).join('')}</select></div>
+      <div class="field"><label>Campo</label><select id="cloCourt"><option value="">Tutti i campi</option>${(state.club.courts||[]).map(c=>`<option value="${c.id}">${c.name}</option>`).join('')}</select></div>
+      <div class="field"><label>Motivo (facoltativo)</label><input id="cloLabel" placeholder="Es. Pausa pranzo"></div>
+      <div class="field"><label>Dal giorno (facoltativo)</label><input type="date" id="cloStart"></div>
+      <div class="field"><label>Fino al giorno (facoltativo)</label><input type="date" id="cloEnd"></div>
+      <button class="btn-clay" id="cloAddBtn" style="width:100%;margin-top:8px;">Aggiungi chiusura ricorrente</button>
+    </div>
+
+    <div class="card">
       <div class="section-title">Ore alla mezz'ora (eccezione)</div>
       <div class="hint" style="margin-bottom:8px;">Una o più ore consecutive su un campo partono alla mezz'ora (19:00–20:00 diventa 19:30–20:30). Nella griglia dei soci non si vede: lo vede solo chi ha prenotato quell'ora. L'ora subito dopo la serie non è più prenotabile e la mezz'ora prima e dopo restano libere (le vede solo l'admin).</div>
       <div class="field"><label>Giorno</label><input type="date" class="adminDayInput" value="${state.selectedDate}" min="${todayKey()}"></div>
@@ -5030,6 +5227,15 @@ function renderAdminScreen(host){
       </div>
       <div class="hint">Segnaposto disponibili: {giorno} {data} {ora} {campo}</div>
       <button class="btn-ghost" id="saveWaBtn" style="width:100%;margin-top:8px;">Salva messaggio</button>
+    </div>
+
+    <div class="card">
+      <div class="section-title">Raccolta punti — attivazione</div>
+      <div class="hint" style="margin-bottom:8px;">Finché è disattivata i soci non vedono punti, conferma del compagno né storico. Quando la attivi contano solo le ore giocate dalla data di partenza in poi (es. 1 gennaio 2027, con le nuove quote sociali).</div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:14px;"><input type="checkbox" id="loyEnabled" style="width:auto;margin:0;" ${loyaltyConfig().enabled?'checked':''}> Raccolta punti attiva</label>
+      <div class="field" style="margin-top:8px;"><label>Parte dal giorno (facoltativo)</label><input type="date" id="loyStart" value="${esc(loyaltyConfig().start)}"></div>
+      <div class="hint" id="loyStateHint" style="margin-bottom:6px;">${loyaltyConfig().enabled ? (loyaltyActive() ? 'Stato attuale: attiva.' : 'Stato attuale: attiva dal '+esc(fmtDateDisplay(loyaltyConfig().start))+' (i soci vedono un avviso "in arrivo").') : 'Stato attuale: disattivata.'}</div>
+      <button class="btn-primary" id="saveLoyEnableBtn" style="width:100%;">Salva attivazione</button>
     </div>
 
     <div class="card">
@@ -5307,6 +5513,52 @@ function renderAdminScreen(host){
         rate: state.club.rates[mode], startDate, endDate, createdAt: Date.now()
       });
       toast('Prenotazione fissa creata');
+    }catch(e){ toast('Errore: '+e.message); }
+  };
+
+  screen.querySelector('#saveLoyEnableBtn').onclick = async () => {
+    const enabled = screen.querySelector('#loyEnabled').checked;
+    const start = screen.querySelector('#loyStart').value || null;
+    try{
+      await update(ref(db, cpath('info')), { loyaltyEnabled: enabled, loyaltyStartDate: start });
+      toast(!enabled ? 'Raccolta punti disattivata' : (start && start > todayKey() ? 'Raccolta punti attiva dal '+fmtDateDisplay(start) : 'Raccolta punti attiva'));
+    }catch(e){ toast('Errore: '+e.message); }
+  };
+
+  const cloList = screen.querySelector('#closureList');
+  Object.entries(state.recurringClosures||{}).sort((a,b)=>((a[1].weekday||7)-(b[1].weekday||7)) || (a[1].startHour-b[1].startHour)).forEach(([id,c])=>{
+    const row = document.createElement('div'); row.className = 'list-row'; row.style.cssText = 'flex-wrap:wrap;gap:4px 8px;';
+    const cn = c.courtId ? (((state.club.courts||[]).find(x=>x.id===c.courtId)||{}).name || c.courtId) : 'tutti i campi';
+    const val = (c.startDate||c.endDate) ? ' · '+(c.startDate?'dal '+fmtDateDisplay(c.startDate):'')+(c.endDate?' fino al '+fmtDateDisplay(c.endDate):'') : '';
+    row.innerHTML = `<span>${esc(WEEKDAY_FULL[c.weekday])} ${String(c.startHour).padStart(2,'0')}:00–${String(c.endHour).padStart(2,'0')}:00<br><span class="hint">${esc(cn)}${c.label?' · '+esc(c.label):''}${esc(val)}</span></span>`;
+    const del = document.createElement('button'); del.type = 'button'; del.className = 'small-btn'; del.textContent = 'Rimuovi';
+    del.onclick = async () => {
+      if(!confirm('Rimuovere questa chiusura ricorrente? I soci potranno di nuovo prenotare in quella fascia.')) return;
+      try{ await remove(ref(db, cpath('recurringClosures/'+id))); toast('Chiusura rimossa'); }catch(e){ toast('Errore: '+e.message); }
+    };
+    row.appendChild(del); cloList.appendChild(row);
+  });
+  if(!cloList.children.length) cloList.appendChild(emptyHintEl('Nessuna chiusura ricorrente.'));
+  screen.querySelector('#cloAddBtn').onclick = async () => {
+    const weekday = parseInt(screen.querySelector('#cloWeekday').value,10);
+    const startHour = parseInt(screen.querySelector('#cloFrom').value,10);
+    const endHour = parseInt(screen.querySelector('#cloTo').value,10);
+    if(!(endHour > startHour)){ toast('L\'ora di fine deve essere dopo quella di inizio'); return; }
+    const courtId = screen.querySelector('#cloCourt').value || null;
+    const label = screen.querySelector('#cloLabel').value.trim().slice(0,60) || null;
+    const startDate = screen.querySelector('#cloStart').value || null;
+    const endDate = screen.querySelector('#cloEnd').value || null;
+    if(startDate && endDate && endDate < startDate){ toast('La data finale è prima di quella iniziale'); return; }
+    const cand = { weekday, startHour, endHour, courtId, startDate, endDate };
+    const clash = Object.values(state.bookingsPublic||{}).filter(b=>{
+      if(!b || b.date < todayKey() || b.hour < startHour || b.hour >= endHour) return false;
+      if(new Date(b.date+'T00:00:00').getDay() !== weekday) return false;
+      if(courtId && b.courtId !== courtId) return false;
+      return (!startDate || b.date >= startDate) && (!endDate || b.date <= endDate);
+    }).length;
+    try{
+      await set(push(ref(db, cpath('recurringClosures'))), Object.assign({}, cand, { label, createdAt: Date.now() }));
+      toast('Chiusura ricorrente aggiunta'+(clash ? ' — attenzione: '+clash+' prenotazioni future in quella fascia restano valide' : ''));
     }catch(e){ toast('Errore: '+e.message); }
   };
 
