@@ -3341,7 +3341,7 @@ function renderCourts(host){
       <div class="mode-choice" id="modeChoice">
         ${MODES.map(m=>`<button data-mode="${m.id}" class="${state.selectedMode===m.id?'sel':''}">${m.label}${state.isAdmin?`<br><span style="opacity:.7;">€ ${state.club.rates[m.id]}/h</span>`:''}</button>`).join('')}
       </div>
-      ${state.isAdmin ? `<div class="mode-choice" id="modeChoiceAdmin" style="margin-top:8px;">${ADMIN_ONLY_MODES.map(m=>`<button data-mode="${m.id}" class="${state.selectedMode===m.id?'sel':''}">${m.label}<br><span style="opacity:.7;">€ ${state.club.rates[m.id]}/h · solo admin</span></button>`).join('')}</div>` : ''}
+      ${state.isAdmin ? `<div class="mode-choice" id="modeChoiceAdmin" style="margin-top:8px;">${ADMIN_ONLY_MODES.map(m=>`<button data-mode="${m.id}" class="${state.selectedMode===m.id?'sel':''}">${m.label}<br><span style="opacity:.7;">${modeRateTxt(m.id)} · solo admin</span></button>`).join('')}</div>` : ''}
       ${isAdminOnlyMode(state.selectedMode) ? `<div class="field" style="margin-top:8px;"><label>Nota (facoltativa): gruppo, maestro…</label><input id="satNoteInput" value="${esc(state.satNote)}" placeholder="Es. Gruppo bambini"></div><div class="hint" style="margin-top:6px;">Ora non intestata a un socio: non conta per i punti e non entra nello storico di nessuno.</div>` : ''}
       ${state.selectedMode==='lezione' ? `<div class="hint" style="margin-top:8px;">Il maestro si sceglie al momento di toccare l'ora libera: vedrai solo quelli disponibili in quello slot.</div>` : ''}
     </div>
@@ -3812,6 +3812,27 @@ function resolveBookingTarget(meObj){
   return { memberId: state.bookingForTarget, memberName: m.name, uid: m.uid||null };
 }
 
+/* Tariffa di un'ora: per SAT e Corsi (modalità solo admin) vale SEMPRE la tariffa attuale, così azzerarla azzera subito anche le ore già inserite;
+   per le altre modalità resta il prezzo salvato al momento della prenotazione */
+function bookingRate(mode, stored){
+  if(isAdminOnlyMode(mode)) return Number(((state.club||{}).rates||{})[mode]) || 0;
+  return (typeof stored === 'number') ? stored : (Number(((state.club||{}).rates||{})[mode]) || 0);
+}
+/* Quote fisse mensili di SAT e Corsi: info.fixedFees = { sat, corsi, from:'YYYY-MM' }. Maturano il 1° di ogni mese dal mese indicato. */
+function fixedFeesConfig(){ const f = ((state.club||{}).fixedFees) || {}; return { sat: Number(f.sat)||0, corsi: Number(f.corsi)||0, from: f.from || '' }; }
+function fixedFeeMonths(periodStart, periodEnd){
+  const f = fixedFeesConfig();
+  if(!f.from || !(f.sat || f.corsi)) return 0;
+  const [y0, m0] = f.from.split('-').map(Number);
+  const now = new Date();
+  let n = 0;
+  for(let d = new Date(y0, m0-1, 1); d <= periodEnd && d <= now; d.setMonth(d.getMonth()+1)){ if(d >= periodStart) n++; }
+  return n;
+}
+function modeRateTxt(id){
+  const r = Number(((state.club||{}).rates||{})[id]) || 0;
+  return (r === 0 && fixedFeesConfig()[id] > 0) ? 'quota fissa mensile' : '€ '+r+'/h';
+}
 /* una prenotazione fissa può coprire più ore consecutive (r.hours, default 1): es. SAT dalle 15 alle 19 = hour 15, hours 4 */
 function recHours(r){ return Math.max(1, parseInt(r && r.hours, 10) || 1); }
 function recRangeTxt(r){ return String(r.hour).padStart(2,'0')+':00'+(recHours(r)>1 ? '–'+String(r.hour+recHours(r)).padStart(2,'0')+':00' : ''); }
@@ -5015,7 +5036,7 @@ function renderAdminScreen(host){
     const mode = b.mode || 'normale';
     if(!byMode[mode]) byMode[mode] = {hours:0,revenue:0};
     byMode[mode].hours += 1;
-    const r = (typeof b.rate === 'number') ? b.rate : (state.club.rates[mode]||0);
+    const r = bookingRate(mode, b.rate);
     byMode[mode].revenue += r; totRevenue += r;
   });
   Object.values(state.recurringBookings||{}).forEach(r=>{
@@ -5026,7 +5047,7 @@ function renderAdminScreen(host){
     const mode = r.mode || 'normale';
     if(!byMode[mode]) byMode[mode] = {hours:0,revenue:0};
     byMode[mode].hours += hrs;
-    const rate = (typeof r.rate === 'number') ? r.rate : (state.club.rates[mode]||0);
+    const rate = bookingRate(mode, r.rate);
     byMode[mode].revenue += hrs*rate; totRevenue += hrs*rate;
   });
 
@@ -5053,6 +5074,9 @@ function renderAdminScreen(host){
     if(h>0){ courseRows.push({ name:c.name||'', hours:h, rate, revenue:h*rate }); courseHours += h; courseRevenue += h*rate; }
   });
   totHours += courseHours; totRevenue += courseRevenue;
+  const ffCfg = fixedFeesConfig(), ffMonths = fixedFeeMonths(periodStart, periodEnd);
+  const satFixed = ffMonths * ffCfg.sat, corsiFixed = ffMonths * ffCfg.corsi;
+  totRevenue += satFixed + corsiFixed;
 
   const dayBookings = allPrivate.filter(([_,b])=>b.date===state.selectedDate).sort((a,b)=>a[1].hour-b[1].hour);
   const byTeacherToday = {};
@@ -5196,7 +5220,7 @@ function renderAdminScreen(host){
         <div class="hint" style="margin-top:4px;">Es. SAT dalle 15 alle 19: ora 15:00 e 4 ore.</div>
       </div>
       <div class="field"><label>Modalità</label>
-        <select id="recMode">${ALL_MODES.map(m=>`<option value="${m.id}">${m.label} (€ ${state.club.rates[m.id]}/h)</option>`).join('')}</select>
+        <select id="recMode">${ALL_MODES.map(m=>`<option value="${m.id}">${m.label} (${modeRateTxt(m.id)})</option>`).join('')}</select>
       </div>
       <div class="field"><label>Data inizio</label><input id="recStart" type="date" value="${todayKey()}"></div>
       <div class="field"><label>Data fine (opzionale)</label><input id="recEnd" type="date"></div>
@@ -5387,7 +5411,7 @@ function renderAdminScreen(host){
   const historyHost = screen.querySelector('#historyList');
   historyBookings.forEach(([bid,b])=>{
     const court = (state.club.courts||[]).find(c=>c.id===b.courtId);
-    const rate = (typeof b.rate==='number') ? b.rate : (state.club.rates[b.mode]||0);
+    const rate = bookingRate(b.mode, b.rate);
     const row = document.createElement('div'); row.className='list-row';
     row.innerHTML = `<span>${String(b.hour).padStart(2,'0')}:00 · ${court?court.name:''} · ${b.memberName} · ${modeLabel(b.mode)}${b.teacherName?' · maestro: '+b.teacherName:''} · € ${rate.toFixed(2)}</span>`;
     historyHost.appendChild(row);
@@ -5408,9 +5432,11 @@ function renderAdminScreen(host){
     { label:'Corsi (altro maestro)', d: byMode.corsi||{hours:0,revenue:0} },
     { label:'Corsi del circolo (ore campo)', d:{ hours:courseHours, revenue:courseRevenue } },
   ];
+  if(ffCfg.sat > 0) contabilitaLines.push({ label:'SAT — quota fissa mensile', d:{ months:ffMonths, revenue:satFixed } });
+  if(ffCfg.corsi > 0) contabilitaLines.push({ label:'Corsi — quota fissa mensile', d:{ months:ffMonths, revenue:corsiFixed } });
   contabilitaLines.forEach(line=>{
     const row = document.createElement('div'); row.className='list-row';
-    row.innerHTML = `<span>${line.label}</span><span class="pill">${line.d.hours}h · € ${line.d.revenue.toFixed(2)}</span>`;
+    row.innerHTML = `<span>${line.label}</span><span class="pill">${line.d.months!=null ? line.d.months+(line.d.months===1?' mese':' mesi') : line.d.hours+'h'} · € ${line.d.revenue.toFixed(2)}</span>`;
     modeBreakdown.appendChild(row);
   });
   courseRows.forEach(r=>{ // dettaglio per corso: ore x quota oraria
@@ -5426,10 +5452,23 @@ function renderAdminScreen(host){
     row.innerHTML = `<label>${m.label}${ADMIN_ONLY_MODES.some(am=>am.id===m.id)?' (solo admin)':''}</label><input type="number" min="0" step="0.5" id="rate_${m.id}" value="${state.club.rates[m.id]}">`;
     ratesHost.appendChild(row);
   });
+  { const ff = fixedFeesConfig();
+    ratesHost.insertAdjacentHTML('beforeend', `
+      <div class="section-title" style="margin-top:12px;">Quote fisse mensili (SAT e Corsi)</div>
+      <div class="hint" style="margin-bottom:8px;">Se SAT o Corsi pagano un mensile fisso, metti a 0 la tariffa oraria corrispondente qui sopra: le ore non generano più incasso e la quota matura il 1° di ogni mese, dal mese indicato.</div>
+      <div class="field" style="margin-bottom:8px;"><label>SAT — quota fissa mensile (€)</label><input type="number" min="0" step="1" id="fix_sat" value="${ff.sat}"></div>
+      <div class="field" style="margin-bottom:8px;"><label>Corsi — quota fissa mensile (€)</label><input type="number" min="0" step="1" id="fix_corsi" value="${ff.corsi}"></div>
+      <div class="field" style="margin-bottom:8px;"><label>Si conta dal mese</label><input type="month" id="fix_from" value="${esc(ff.from)}"></div>`); }
   screen.querySelector('#saveRatesBtn').onclick = async () => {
     const newRates = {};
     ALL_MODES.forEach(m=>{ newRates[m.id] = parseFloat(screen.querySelector('#rate_'+m.id).value) || 0; });
-    try{ await update(ref(db, cpath('info/rates')), newRates); toast('Tariffe aggiornate'); }
+    const fixSat = Math.max(0, parseFloat(screen.querySelector('#fix_sat').value) || 0);
+    const fixCorsi = Math.max(0, parseFloat(screen.querySelector('#fix_corsi').value) || 0);
+    const fixFrom = screen.querySelector('#fix_from').value || ((fixSat>0 || fixCorsi>0) ? currentYearMonth() : null);
+    try{
+      await update(ref(db, cpath('info/rates')), newRates);
+      await set(ref(db, cpath('info/fixedFees')), { sat: fixSat, corsi: fixCorsi, from: fixFrom });
+      toast('Tariffe aggiornate'); }
     catch(e){ toast('Errore: '+e.message); }
   };
 
@@ -5437,7 +5476,7 @@ function renderAdminScreen(host){
   dayBookings.forEach(([bid,b])=>{
     const court = (state.club.courts||[]).find(c=>c.id===b.courtId);
     const row = document.createElement('div'); row.className='list-row';
-    const currentRate = (typeof b.rate==='number') ? b.rate : (state.club.rates[b.mode]||0);
+    const currentRate = bookingRate(b.mode, b.rate);
     row.innerHTML = `<span>${String(b.hour).padStart(2,'0')}:00 · ${court?court.name:''} · ${b.memberName} · ${modeLabel(b.mode)}${b.teacherName?' · maestro: '+b.teacherName:''} · € ${currentRate.toFixed(2)}</span>`;
     if(b.mode==='normale' || b.mode==='doppio'){
       const editPrice = document.createElement('button'); editPrice.className='small-btn'; editPrice.textContent='Modifica quota';
