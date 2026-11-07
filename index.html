@@ -343,6 +343,8 @@ const MIN_CANCEL_HOURS = 24;
 const MAX_ADVANCE_DAYS = 7;
 const OPEN_HOUR = 7;
 const CLOSE_HOUR = 23;
+/* Ore riservate all'admin: info.adminOnlyHours = { h7:true, h8:true, h22:true }. I soci le vedono "riservato" e non le prenotano. */
+function adminOnlyHour(h){ const o = ((state.club||{}).adminOnlyHours) || {}; return o['h'+h] === true; }
 const IT_DOW = ['DOM','LUN','MAR','MER','GIO','VEN','SAB'];
 const WEEKDAY_FULL = ['Domenica','Lunedì','Martedì','Mercoledì','Giovedì','Venerdì','Sabato'];
 
@@ -3466,9 +3468,13 @@ function renderCourts(host){
       } else if(tooFarAhead){
         slotEl.className = 'slot past'; slotEl.textContent = label;
         slotEl.title = 'Prenotabile da '+MAX_ADVANCE_DAYS+' giorni prima';
+      } else if(!state.isAdmin && adminOnlyHour(h)){
+        slotEl.className = 'slot blocked'; slotEl.innerHTML = `${label}<span class="who">riservato</span>`;
+        slotEl.title = 'Ora riservata alla segreteria';
       } else {
         slotEl.className = 'slot free';
         if(shiftedHere && state.isAdmin){ slotEl.innerHTML = `${hmFmt(h,true)}<span class="mode-tag">+30′</span>`; slotEl.title = slotRange(court.id, state.selectedDate, h); }
+        else if(state.isAdmin && adminOnlyHour(h)){ slotEl.innerHTML = `${label}<span class="mode-tag">admin</span>`; slotEl.title = 'Ora riservata: la prenotano solo gli admin'; }
         else slotEl.textContent = label;
         slotEl.onclick = () => {
           const target = resolveBookingTarget(meObj);
@@ -5331,6 +5337,13 @@ function renderAdminScreen(host){
     </div>
 
     <div class="card">
+      <div class="section-title">Ore riservate all'admin</div>
+      <div class="hint" style="margin-bottom:8px;">Le ore selezionate le possono prenotare solo gli admin: i soci le vedono come "riservato". Utile per le prime ore del mattino o l'ultima della sera.</div>
+      <div id="adminHoursHost" style="display:flex;flex-wrap:wrap;gap:6px 12px;"></div>
+      <button class="btn-primary" id="saveAdminHoursBtn" style="width:100%;margin-top:10px;">Salva ore riservate</button>
+    </div>
+
+    <div class="card">
       <div class="section-title">Prenotazioni fisse (ricorrenti)</div>
       <div class="hint" style="margin-bottom:8px;">Si ripetono ogni settimana lo stesso giorno e ora. Solo l'admin può crearle o rimuoverle — pensate per accordi presi direttamente con la segreteria.</div>
       <div id="recurringList"></div>
@@ -5711,6 +5724,18 @@ function renderAdminScreen(host){
     }catch(e){ toast('Errore: '+e.message); }
   };
 
+  { const host = screen.querySelector('#adminHoursHost');
+    for(let h=OPEN_HOUR; h<CLOSE_HOUR; h++){
+      const lab = document.createElement('label'); lab.style.cssText = 'display:flex;align-items:center;gap:4px;font-size:14px;';
+      lab.innerHTML = `<input type="checkbox" data-h="${h}" ${adminOnlyHour(h)?'checked':''}> ${String(h).padStart(2,'0')}:00`;
+      host.appendChild(lab);
+    }
+    screen.querySelector('#saveAdminHoursBtn').onclick = async () => {
+      const o = {}; host.querySelectorAll('input:checked').forEach(i=>{ o['h'+i.dataset.h] = true; });
+      try{ await set(ref(db, cpath('info/adminOnlyHours')), Object.keys(o).length ? o : null); toast(Object.keys(o).length ? 'Ore riservate salvate' : 'Nessuna ora riservata'); }
+      catch(e){ toast('Errore: '+e.message); }
+    };
+  }
   screen.querySelector('#saveLoyEnableBtn').onclick = async () => {
     const enabled = screen.querySelector('#loyEnabled').checked;
     const start = screen.querySelector('#loyStart').value || null;
