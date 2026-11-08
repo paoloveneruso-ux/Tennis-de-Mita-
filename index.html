@@ -233,10 +233,12 @@
   .totale-box .l{font-size:12px;color:var(--ink-dim);text-transform:uppercase;letter-spacing:.06em;font-family:var(--font-mono);}
   .totale-box .v{font-family:var(--font-display);font-size:22px;color:var(--ball-text);}
   .loading{display:flex;align-items:center;justify-content:center;flex:1;color:var(--ink-dim);font-family:var(--font-mono);font-size:13px;text-align:center;padding:0 30px;}
-  .toast{position:fixed;bottom:78px;left:50%;transform:translateX(-50%);background:var(--navy);border:1px solid var(--navy);color:#fff;padding:10px 16px;border-radius:8px;font-size:13px;z-index:80;animation:fadeUp .25s ease;max-width:85%;text-align:center;}
+  .toast{position:fixed;bottom:78px;left:50%;transform:translateX(-50%);background:var(--navy);border:1px solid var(--navy);color:#fff;padding:10px 16px;border-radius:8px;font-size:13px;z-index:100001;animation:fadeUp .25s ease;max-width:85%;text-align:center;}
   @keyframes fadeUp{from{opacity:0;transform:translate(-50%,8px)}to{opacity:1;transform:translate(-50%,0)}}
   .modal-overlay{position:fixed;inset:0;background:rgba(20,22,34,.62);display:flex;align-items:flex-end;justify-content:center;z-index:99999;}
-  .modal{background:var(--board-2);border:1px solid var(--line);border-radius:14px 14px 0 0;padding:20px;width:100%;max-width:520px;max-height:88vh;overflow-y:auto;display:flex;flex-direction:column;gap:14px;box-shadow:0 -8px 40px rgba(0,0,0,.35);}
+  .modal{background:var(--board-2);border:1px solid var(--line);border-radius:14px 14px 0 0;padding:20px;width:100%;max-width:520px;max-height:88vh;max-height:88dvh;overflow-y:auto;overscroll-behavior:contain;display:flex;flex-direction:column;gap:14px;box-shadow:0 -8px 40px rgba(0,0,0,.35);}
+  .modal .btn-row:last-child{position:sticky;bottom:-20px;background:var(--board-2);padding:12px 0 6px;margin-bottom:-6px;z-index:2;}
+  .modal .err-line{color:#ffd9cf;background:rgba(0,0,0,.25);border-radius:8px;padding:8px 10px;font-size:13px;}
   .modal h4{margin:0;font-family:var(--font-display);text-transform:uppercase;font-size:17px;}
   .name-link{background:none;border:none;padding:0;margin:0;font:inherit;color:var(--chalk);text-align:left;cursor:pointer;text-decoration:underline dotted;text-underline-offset:4px;}
   .copy-code{font-family:var(--font-mono);font-size:26px;letter-spacing:.12em;text-align:center;background:var(--tile);border:1px dashed var(--clay);border-radius:8px;padding:14px;color:var(--ball-text);}
@@ -3934,6 +3936,7 @@ function openRecurringEditor(rid, r){
     <div class="hint" id="reRateNote" style="display:none;margin-bottom:8px;">SAT e Corsi usano sempre la tariffa attuale (o la quota fissa mensile): qui non si imposta.</div>
     <div class="field"><label>Data inizio</label><input id="reStart" type="date" value="${esc(r.startDate||'')}"></div>
     <div class="field"><label>Data fine (opzionale)</label><input id="reEnd" type="date" value="${esc(r.endDate||'')}"></div>
+    <div class="err-line" id="reErr" style="display:none;"></div>
     <div class="btn-row"><button class="btn-ghost" id="reCancel">Annulla</button><button class="btn-primary" id="reSave">Salva modifiche</button></div>
   </div>`;
   document.body.appendChild(ov);
@@ -3965,26 +3968,28 @@ function openRecurringEditor(rid, r){
   sync();
   q('reCancel').onclick = () => ov.remove();
   q('reSave').onclick = async () => {
+    const fail = m => { toast(m); const e = q('reErr'); e.textContent = m; e.style.display = 'block'; e.scrollIntoView({block:'nearest'}); };
+    q('reErr').style.display = 'none';
     const targetVal = q('reTarget').value;
     let memberId = null, memberName = '', uid = null;
-    if(targetVal==='__guest__'){ memberName = q('reName').value.trim(); if(!memberName){ toast('Inserisci il nome'); return; } }
-    else { const m = state.members[targetVal]; if(!m){ toast('Socio non trovato'); return; } memberId = targetVal; memberName = m.name; uid = m.uid||null; }
+    if(targetVal==='__guest__'){ memberName = q('reName').value.trim(); if(!memberName){ fail('Inserisci il nome'); return; } }
+    else { const m = state.members[targetVal]; if(!m){ fail('Socio non trovato'); return; } memberId = targetVal; memberName = m.name; uid = m.uid||null; }
     const courtId = q('reCourt').value, weekday = parseInt(q('reWeekday').value,10), hour = parseInt(q('reHour').value,10);
     const hours = parseInt(q('reHours').value,10) || 1, mode = q('reMode').value;
     const startDate = q('reStart').value, endDate = q('reEnd').value || null;
-    if(!startDate){ toast('Inserisci la data di inizio'); return; }
-    if(hour + hours > CLOSE_HOUR){ toast('Le ore devono finire entro le '+String(CLOSE_HOUR).padStart(2,'0')+':00'); return; }
-    if(endDate && endDate < startDate){ toast('La data finale è prima di quella iniziale'); return; }
+    if(!startDate){ fail('Inserisci la data di inizio'); return; }
+    if(hour + hours > CLOSE_HOUR){ fail('Le ore devono finire entro le '+String(CLOSE_HOUR).padStart(2,'0')+':00'); return; }
+    if(endDate && endDate < startDate){ fail('La data finale è prima di quella iniziale'); return; }
     let teacherUid = null, teacherXid = null, teacherName = null;
     if(mode==='lezione'){
       const tv = q('reTeacher').value;
-      if(!tv || tv==='__new__'){ toast('Scegli il maestro della lezione'); return; }
+      if(!tv || tv==='__new__'){ fail('Scegli il maestro della lezione'); return; }
       if(tv.indexOf('u:')===0){ teacherUid = tv.slice(2); teacherName = memberNameByUid(teacherUid) || r.teacherName || ''; }
       else { teacherXid = tv.slice(2); teacherName = (state.extraTeachers[teacherXid]||{}).name || r.teacherName || ''; }
     }
     let rate = parseFloat(q('reRate').value);
     if(isAdminOnlyMode(mode)) rate = Number((state.club.rates||{})[mode])||0;
-    else if(isNaN(rate) || rate < 0){ toast('Quota non valida'); return; }
+    else if(isNaN(rate) || rate < 0){ fail('Quota non valida'); return; }
     const overlap = Object.entries(state.recurringBookings||{}).find(([oid,o])=> oid!==rid && o.courtId===courtId && o.weekday===weekday
       && hour < o.hour+recHours(o) && o.hour < hour+hours && (!o.endDate || o.endDate >= startDate) && (!endDate || o.startDate <= endDate));
     if(overlap && !confirm('Si sovrappone a una prenotazione fissa già presente ('+overlap[1].memberName+', '+recRangeTxt(overlap[1])+').\n\nSalvare comunque?')) return;
@@ -3996,7 +4001,7 @@ function openRecurringEditor(rid, r){
       }
       await update(ref(db, cpath('recurringBookings/'+rid)), { memberId, memberName, uid, courtId, weekday, hour, hours, mode, rate, startDate, endDate, teacherUid, teacherXid, teacherName, half: half ? true : null });
       ov.remove(); toast('Prenotazione fissa aggiornata');
-    }catch(e){ toast('Errore: '+e.message); }
+    }catch(e){ fail('Errore: '+e.message); }
   };
 }
 
