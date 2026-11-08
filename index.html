@@ -45,7 +45,8 @@
   input:focus,select:focus{outline:none;border-color:var(--lime);box-shadow:0 0 0 2px var(--lime);}
   input::placeholder{color:rgba(255,255,255,.6);}
   select option{background:var(--navy);color:#fff;}
-  input[type=checkbox],input[type=radio]{accent-color:var(--lime);}
+  input[type=checkbox],input[type=radio]{accent-color:var(--lime);width:auto;flex:none;margin:0;padding:0;}
+  input[type=date],input[type=month]{min-width:0;max-width:100%;box-sizing:border-box;-webkit-appearance:none;appearance:none;text-align:left;min-height:46px;}
   button{font-family:var(--font-display);text-transform:uppercase;letter-spacing:.03em;font-weight:600;border:none;border-radius:8px;padding:12px 16px;font-size:14px;cursor:pointer;transition:transform .1s ease, opacity .15s;}
   button:active{transform:scale(0.97);}
   button:disabled{opacity:.35;cursor:default;}
@@ -5361,13 +5362,14 @@ function renderAdminScreen(host){
     <div class="card">
       <div class="section-title">Ore riservate all'admin</div>
       <div class="hint" style="margin-bottom:8px;">Le ore selezionate le possono prenotare solo gli admin: i soci le vedono come "riservato". Utile per le prime ore del mattino o l'ultima della sera.</div>
-      <div id="adminHoursHost" style="display:flex;flex-wrap:wrap;gap:6px 12px;"></div>
+      <div id="adminHoursHost" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px 6px;"></div>
       <button class="btn-primary" id="saveAdminHoursBtn" style="width:100%;margin-top:10px;">Salva ore riservate</button>
     </div>
 
     <div class="card">
       <div class="section-title">Prenotazioni fisse (ricorrenti)</div>
       <div class="hint" style="margin-bottom:8px;">Si ripetono ogni settimana lo stesso giorno e ora. Solo l'admin può crearle o rimuoverle — pensate per accordi presi direttamente con la segreteria.</div>
+      <div class="field" style="margin-bottom:8px;"><label>Mostra il giorno</label><select id="recDayFilter"></select></div>
       <div id="recurringList"></div>
       <div class="field" style="margin-top:8px;"><label>Per chi</label>
         <select id="recTarget">
@@ -5691,26 +5693,42 @@ function renderAdminScreen(host){
   recTargetSel.onchange = syncRecGuestWrap;
 
   const recurringListHost = screen.querySelector('#recurringList');
-  const recurringEntries = Object.entries(state.recurringBookings||{}).sort((a,b)=>(a[1].weekday-b[1].weekday)||(a[1].hour-b[1].hour));
-  if(!recurringEntries.length){ recurringListHost.innerHTML = `<div class="hint">Nessuna prenotazione fissa attiva.</div>`; }
-  recurringEntries.forEach(([rid,r])=>{
-    const court = (state.club.courts||[]).find(c=>c.id===r.courtId);
-    const row = document.createElement('div'); row.className='list-row';
-    const rateTxt = (r.mode && !isAdminOnlyMode(r.mode) && typeof r.rate==='number') ? ' · € '+r.rate+'/h' : '';
-    row.style.cssText = 'flex-wrap:wrap;gap:4px 8px;';
-    row.innerHTML = `<span>${esc(WEEKDAY_FULL[r.weekday])} ${recRangeTxt(r)} · ${esc(court?court.name:'')} · ${esc(r.memberName)} · ${esc(modeLabel(r.mode))}${r.teacherName?' · '+esc(r.teacherName):''}${esc(rateTxt)}${r.endDate?(' · fino al '+esc(fmtDateDisplay(r.endDate))):''}</span>`;
-    const edit = document.createElement('button'); edit.type='button'; edit.className='small-btn'; edit.textContent='Modifica';
-    edit.onclick = () => openRecurringEditor(rid, r);
-    row.appendChild(edit);
-    const del = document.createElement('button'); del.className='small-btn'; del.textContent='Rimuovi';
-    del.onclick = async () => {
-      if(confirm('Rimuovere la prenotazione fissa di '+r.memberName+'?')){
-        try{ await remove(ref(db, cpath('recurringBookings/'+rid))); }catch(e){ toast('Errore: '+e.message); }
-      }
-    };
-    row.appendChild(del);
-    recurringListHost.appendChild(row);
-  });
+  const recDaySel = screen.querySelector('#recDayFilter');
+  const DAY_ORDER = [1,2,3,4,5,6,0]; // lunedì … domenica
+  const allRec = Object.entries(state.recurringBookings||{}).sort((a,b)=>(a[1].hour-b[1].hour)||String(a[1].courtId).localeCompare(String(b[1].courtId)));
+  if(state.recDay === undefined) state.recDay = new Date().getDay();
+  recDaySel.innerHTML = DAY_ORDER.map(d=>`<option value="${d}">${esc(WEEKDAY_FULL[d])} (${allRec.filter(([_,r])=>r.weekday===d).length})</option>`).join('')
+    + `<option value="all">Tutti i giorni (${allRec.length})</option>`;
+  recDaySel.value = String(state.recDay);
+  const paintRecList = () => {
+    recurringListHost.replaceChildren();
+    const sel = recDaySel.value;
+    const list = (sel==='all'
+      ? allRec.slice().sort((a,b)=>(DAY_ORDER.indexOf(a[1].weekday)-DAY_ORDER.indexOf(b[1].weekday))||(a[1].hour-b[1].hour))
+      : allRec.filter(([_,r])=>String(r.weekday)===sel));
+    if(!list.length){ recurringListHost.innerHTML = `<div class="hint">${sel==='all' ? 'Nessuna prenotazione fissa attiva.' : 'Nessuna prenotazione fissa questo giorno.'}</div>`; return; }
+    list.forEach(([rid,r])=>{
+      const court = (state.club.courts||[]).find(c=>c.id===r.courtId);
+      const row = document.createElement('div'); row.className='list-row';
+      const rateTxt = (r.mode && !isAdminOnlyMode(r.mode) && typeof r.rate==='number') ? ' · € '+r.rate+'/h' : '';
+      row.style.cssText = 'flex-wrap:wrap;gap:4px 8px;';
+      const dayTxt = sel==='all' ? WEEKDAY_FULL[r.weekday].slice(0,3)+' ' : '';
+      row.innerHTML = `<span>${esc(dayTxt)}${recRangeTxt(r)} · ${esc(court?court.name:'')} · ${esc(r.memberName)} · ${esc(modeLabel(r.mode))}${r.teacherName?' · '+esc(r.teacherName):''}${esc(rateTxt)}${r.endDate?(' · fino al '+esc(fmtDateDisplay(r.endDate))):''}</span>`;
+      const edit = document.createElement('button'); edit.type='button'; edit.className='small-btn'; edit.textContent='Modifica';
+      edit.onclick = () => openRecurringEditor(rid, r);
+      row.appendChild(edit);
+      const del = document.createElement('button'); del.className='small-btn'; del.textContent='Rimuovi';
+      del.onclick = async () => {
+        if(confirm('Rimuovere la prenotazione fissa di '+r.memberName+'?')){
+          try{ await remove(ref(db, cpath('recurringBookings/'+rid))); }catch(e){ toast('Errore: '+e.message); }
+        }
+      };
+      row.appendChild(del);
+      recurringListHost.appendChild(row);
+    });
+  };
+  recDaySel.onchange = () => { state.recDay = recDaySel.value==='all' ? 'all' : parseInt(recDaySel.value,10); paintRecList(); };
+  paintRecList();
 
   screen.querySelector('#addRecurringBtn').onclick = async () => {
     const targetVal = recTargetSel.value;
@@ -5754,7 +5772,7 @@ function renderAdminScreen(host){
 
   { const host = screen.querySelector('#adminHoursHost');
     for(let h=OPEN_HOUR; h<CLOSE_HOUR; h++){
-      const lab = document.createElement('label'); lab.style.cssText = 'display:flex;align-items:center;gap:4px;font-size:14px;';
+      const lab = document.createElement('label'); lab.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:14px;white-space:nowrap;';
       lab.innerHTML = `<input type="checkbox" data-h="${h}" ${adminOnlyHour(h)?'checked':''}> ${String(h).padStart(2,'0')}:00`;
       host.appendChild(lab);
     }
