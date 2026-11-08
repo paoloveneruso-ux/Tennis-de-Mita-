@@ -3183,7 +3183,17 @@ async function cancelBooking(bid, ownerUid, teacherUid, auditInfo){
 function hmFmt(h, half){ return String(h).padStart(2,'0')+':'+(half?'30':'00'); }
 function minFmt(m){ return String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0'); }
 function shiftKey(date, courtId, hour){ return date+'_'+String(courtId).replace(/[.$#\[\]\/]/g,'-')+'_'+hour; }
-function isHalfShifted(courtId, date, hour){ return !!(state.halfShifts||{})[shiftKey(date, courtId, hour)]; }
+function isHalfShiftedOneOff(courtId, date, hour){ return !!(state.halfShifts||{})[shiftKey(date, courtId, hour)]; }
+/* una prenotazione fissa con half:true parte alla mezz'ora (es. 19:30–21:30) tutte le settimane, senza spostarla giorno per giorno */
+function recurringHalfAt(courtId, date, hour){ return Object.values(state.recurringBookings||{}).some(r=>r && r.half===true && recurringCoversSlot(r, courtId, date, hour)); }
+function isHalfShifted(courtId, date, hour){ return isHalfShiftedOneOff(courtId, date, hour) || recurringHalfAt(courtId, date, hour); }
+/* controllo (indicativo) sull'ora subito dopo una fissa alla mezz'ora: perde la prima mezz'ora, quindi non dovrebbe avere un'altra fissa a ora esatta */
+function recurringNextHourClash(courtId, weekday, endHour, startDate, endDate, skipRid){
+  if(endHour >= CLOSE_HOUR) return null;
+  const hit = Object.entries(state.recurringBookings||{}).find(([rid,o])=> rid!==skipRid && o.courtId===courtId && o.weekday===weekday && !o.half
+    && endHour >= o.hour && endHour < o.hour+recHours(o) && (!o.endDate || o.endDate >= startDate) && (!endDate || o.startDate <= endDate));
+  return hit ? hit[1] : null;
+}
 function slotRange(courtId, date, hour){ const sh = isHalfShifted(courtId, date, hour); return hmFmt(hour, sh)+'–'+hmFmt(hour+1, sh); }
 function slotAfterShiftRun(courtId, date, hour){
   return hour>OPEN_HOUR && isHalfShifted(courtId, date, hour-1) && !isHalfShifted(courtId, date, hour);
@@ -3195,10 +3205,10 @@ function slotTakenAnyHere(courtId, date, hour){ // prenotazione, chiusura, corso
     || Object.values(state.recurringBookings||{}).some(r=>recurringCoversSlot(r, courtId, date, hour))
     || !!closureEntryFor(courtId, date, hour);
 }
-function halfShiftRuns(courtId, date){ // serie di ore consecutive spostate: [{from,to}]
+function halfShiftRuns(courtId, date, storedOnly){ // serie di ore consecutive spostate: [{from,to}]
   const runs = [];
   for(let h=OPEN_HOUR; h<CLOSE_HOUR; h++){
-    if(!isHalfShifted(courtId, date, h)) continue;
+    if(!(storedOnly ? isHalfShiftedOneOff(courtId, date, h) : isHalfShifted(courtId, date, h))) continue;
     const last = runs[runs.length-1];
     if(last && last.to===h-1) last.to = h; else runs.push({ from:h, to:h });
   }
@@ -3420,11 +3430,14 @@ function renderCourts(host){
         const [,r] = recurringEntry;
         const mineFixed = r.uid === state.uid;
         slotEl.className = 'slot ' + (mineFixed ? 'mine' : 'taken');
+        const recShift = r.half === true && (mineFixed || state.isAdmin);
+        const rlabel = recShift ? hmFmt(h,true) : label;
         if(state.isAdmin){
           const satLike = r.mode==='sat' || r.mode==='corsi';
-          slotEl.innerHTML = `${label}<span class="who nm">${esc(satLike ? (r.mode==='sat'?'SAT':'Corsi') : (shortPersonName(r.memberName)||'fisso'))}</span><span class="mode-tag" style="text-transform:none;">${esc(satLike && r.memberName && r.memberName!=='SAT' && r.memberName!=='Corsi' ? r.memberName : 'fisso')}</span>`;
+          slotEl.innerHTML = `${rlabel}<span class="who nm">${esc(satLike ? (r.mode==='sat'?'SAT':'Corsi') : (shortPersonName(r.memberName)||'fisso'))}</span><span class="mode-tag" style="text-transform:none;">${esc(satLike && r.memberName && r.memberName!=='SAT' && r.memberName!=='Corsi' ? r.memberName : 'fisso')}</span>`;
           slotEl.title = 'Fisso · '+(r.memberName||'')+(r.teacherName ? ' · maestro '+r.teacherName : '');
-        } else slotEl.innerHTML = `${label}<span class="who">${mineFixed?'tuo fisso':'fisso'}</span>`;
+          if(recShift) slotEl.title += ' · '+slotRange(court.id, state.selectedDate, h);
+        } else slotEl.innerHTML = `${rlabel}<span class="who">${mineFixed?'tuo fisso':'fisso'}</span>${recShift?'<span class="mode-tag">+30′</span>':''}`;
       } else if(bookingEntry){
         const [bid, b] = bookingEntry;
         const mine = !!state.myBookingIds[bid];
@@ -3883,7 +3896,10 @@ function modeRateTxt(id){
 }
 /* una prenotazione fissa può coprire più ore consecutive (r.hours, default 1): es. SAT dalle 15 alle 19 = hour 15, hours 4 */
 function recHours(r){ return Math.max(1, parseInt(r && r.hours, 10) || 1); }
-function recRangeTxt(r){ return String(r.hour).padStart(2,'0')+':00'+(recHours(r)>1 ? '–'+String(r.hour+recHours(r)).padStart(2,'0')+':00' : ''); }
+function recRangeTxt(r){
+  const m = r.half === true ? '30' : '00';
+  return String(r.hour).padStart(2,'0')+':'+m+(recHours(r)>1 || r.half===true ? '–'+String(r.hour+recHours(r)).padStart(2,'0')+':'+m : '');
+}
 /* Modifica di una prenotazione fissa: persona, campo, giorno, ora, durata, modalità, maestro (se lezione), quota oraria e date */
 function openRecurringEditor(rid, r){
   const courts = state.club.courts || [];
@@ -3910,6 +3926,7 @@ function openRecurringEditor(rid, r){
     <div class="field"><label>Giorno</label><select id="reWeekday">${WEEKDAY_FULL.map((w,i)=>opt(String(i),w,i===r.weekday)).join('')}</select></div>
     <div class="field"><label>Ora</label><select id="reHour">${Array.from({length:CLOSE_HOUR-OPEN_HOUR},(_,i)=>{const h=OPEN_HOUR+i;return opt(String(h),String(h).padStart(2,'0')+':00',h===r.hour);}).join('')}</select></div>
     <div class="field"><label>Ore consecutive</label><select id="reHours">${[1,2,3,4,5,6].map(n=>opt(String(n),n===1?'1 ora':n+' ore',n===recHours(r))).join('')}</select></div>
+    <label style="display:flex;align-items:center;gap:8px;margin:2px 0 10px;font-size:14px;"><input type="checkbox" id="reHalf" ${r.half===true?'checked':''}> Parte alla mezz'ora (es. 19:30–20:30), ogni settimana</label>
     <div class="field"><label>Modalità</label><select id="reMode">${ALL_MODES.map(m=>opt(m.id,m.label,m.id===r.mode)).join('')}</select></div>
     <div class="field" id="reTeacherWrap"><label>Maestro (lezione)</label><select id="reTeacher">${teacherOpts}</select></div>
     <div class="field" id="reRateWrap"><label>Quota pagata (€ per ora)</label><input id="reRate" type="number" min="0" step="0.5" inputmode="decimal" value="${rateInit}"></div>
@@ -3971,7 +3988,12 @@ function openRecurringEditor(rid, r){
       && hour < o.hour+recHours(o) && o.hour < hour+hours && (!o.endDate || o.endDate >= startDate) && (!endDate || o.startDate <= endDate));
     if(overlap && !confirm('Si sovrappone a una prenotazione fissa già presente ('+overlap[1].memberName+', '+recRangeTxt(overlap[1])+').\n\nSalvare comunque?')) return;
     try{
-      await update(ref(db, cpath('recurringBookings/'+rid)), { memberId, memberName, uid, courtId, weekday, hour, hours, mode, rate, startDate, endDate, teacherUid, teacherXid, teacherName });
+      const half = q('reHalf').checked;
+      if(half){
+        const clash = recurringNextHourClash(courtId, weekday, hour+hours, startDate, endDate, rid);
+        if(clash && !confirm("Alle "+String(hour+hours).padStart(2,'0')+":00 c'è un'altra prenotazione fissa ("+clash.memberName+"): perderebbe la prima mezz'ora.\n\nSalvare comunque?")) return;
+      }
+      await update(ref(db, cpath('recurringBookings/'+rid)), { memberId, memberName, uid, courtId, weekday, hour, hours, mode, rate, startDate, endDate, teacherUid, teacherXid, teacherName, half: half ? true : null });
       ov.remove(); toast('Prenotazione fissa aggiornata');
     }catch(e){ toast('Errore: '+e.message); }
   };
@@ -5367,6 +5389,7 @@ function renderAdminScreen(host){
         <select id="recHours">${[1,2,3,4,5,6].map(n=>`<option value="${n}">${n===1?'1 ora':n+' ore'}</option>`).join('')}</select>
         <div class="hint" style="margin-top:4px;">Es. SAT dalle 15 alle 19: ora 15:00 e 4 ore.</div>
       </div>
+      <label style="display:flex;align-items:center;gap:8px;margin:2px 0 10px;font-size:14px;"><input type="checkbox" id="recHalf"> Parte alla mezz'ora (es. 19:30–20:30), ogni settimana</label>
       <div class="field"><label>Modalità</label>
         <select id="recMode">${ALL_MODES.map(m=>`<option value="${m.id}">${m.label} (${modeRateTxt(m.id)})</option>`).join('')}</select>
       </div>
@@ -5714,13 +5737,18 @@ function renderAdminScreen(host){
       && hour < o.hour+recHours(o) && o.hour < hour+hours
       && (!o.endDate || o.endDate >= startDate) && (!endDate || o.startDate <= endDate));
     if(overlap && !confirm('Si sovrappone a una prenotazione fissa già presente ('+overlap.memberName+', '+recRangeTxt(overlap)+').\n\nCrearla comunque?')) return;
+    const half = screen.querySelector('#recHalf').checked;
+    if(half){
+      const clash = recurringNextHourClash(courtId, weekday, hour+hours, startDate, endDate, null);
+      if(clash && !confirm("Alle "+String(hour+hours).padStart(2,'0')+":00 c'è un'altra prenotazione fissa ("+clash.memberName+"): perderebbe la prima mezz'ora.\n\nCrearla comunque?")) return;
+    }
     try{
       const newRef = push(ref(db, cpath('recurringBookings')));
       await set(newRef, {
         memberId, memberName, uid, courtId, weekday, hour, hours, mode,
-        rate: state.club.rates[mode], startDate, endDate, createdAt: Date.now()
+        rate: state.club.rates[mode], startDate, endDate, createdAt: Date.now(), ...(half ? { half: true } : {})
       });
-      toast('Prenotazione fissa creata'+(hours>1 ? ' ('+hours+' ore: '+String(hour).padStart(2,'0')+':00–'+String(hour+hours).padStart(2,'0')+':00)' : ''));
+      toast('Prenotazione fissa creata'+(hours>1 || half ? ' ('+(hours===1?'1 ora':hours+' ore')+': '+recRangeTxt({hour,hours,half})+')' : ''));
     }catch(e){ toast('Errore: '+e.message); }
   };
 
@@ -5805,7 +5833,7 @@ function renderAdminScreen(host){
   };
   const halfList = screen.querySelector('#halfList');
   const halfDates = [...new Set(Object.values(state.halfShifts||{}).map(x=>x && x.date).filter(d=>d && d>=todayKey()))].sort();
-  halfDates.forEach(d=>(state.club.courts||[]).forEach(court=>halfShiftRuns(court.id, d).forEach(run=>{
+  halfDates.forEach(d=>(state.club.courts||[]).forEach(court=>halfShiftRuns(court.id, d, true).forEach(run=>{
     const row = document.createElement('div'); row.className = 'list-row'; row.style.cssText = 'flex-wrap:wrap;gap:4px 8px;';
     const n = run.to-run.from+1;
     row.innerHTML = `<span>${WEEKDAY_FULL[new Date(d+'T00:00:00').getDay()].slice(0,3)} ${fmtDateDisplay(d)} · ${esc(court.name)}<br><span class="hint">${hmFmt(run.from,true)}–${hmFmt(run.to+1,true)} · ${n} ${n===1?'ora':'ore'}</span></span>`;
