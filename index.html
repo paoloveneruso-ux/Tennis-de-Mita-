@@ -3423,7 +3423,7 @@ function renderCourts(host){
 
       // il corsista vede la propria ora di corso come "sua" (finché non ha segnato assenza)
       let myCourseHit = null;
-      if(!state.isAdmin && state.myEnrollments){
+      if(state.myEnrollments){ // vale anche per l'admin iscritto a un corso come partecipante
         const dowS = new Date(state.selectedDate+'T00:00:00').getDay();
         myCourseHit = Object.entries(state.courses||{}).find(([cid,c])=> state.myEnrollments[cid] && courseCoversSlot(c, court.id, state.selectedDate, h)
           && enrolleeAttendsSession((state.myEnrollmentData||{})[cid], dowS, h, court.id));
