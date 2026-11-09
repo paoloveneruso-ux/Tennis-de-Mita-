@@ -3421,9 +3421,23 @@ function renderCourts(host){
         recurringCoversSlot(r, court.id, state.selectedDate, h)
       );
 
+      // il corsista vede la propria ora di corso come "sua" (finché non ha segnato assenza)
+      let myCourseHit = null;
+      if(!state.isAdmin && state.myEnrollments){
+        const dowS = new Date(state.selectedDate+'T00:00:00').getDay();
+        myCourseHit = Object.entries(state.courses||{}).find(([cid,c])=> state.myEnrollments[cid] && courseCoversSlot(c, court.id, state.selectedDate, h)
+          && enrolleeAttendsSession((state.myEnrollmentData||{})[cid], dowS, h, court.id));
+        if(myCourseHit) loadMyAttendance(myCourseHit[0], state.selectedDate, state.myEnrollments[myCourseHit[0]]);
+      }
+      const myCoursePresent = !!myCourseHit && attGet(state.myAttendance[myCourseHit[0]+'|'+state.selectedDate], h) !== false;
+
       if(blockEntry){
         slotEl.className = 'slot blocked';
         slotEl.innerHTML = `${label}<span class="who">chiuso</span>`;
+      } else if(myCoursePresent){
+        slotEl.className = 'slot mine' + (isPast?' past':'');
+        slotEl.innerHTML = `${label}<span class="who">Corso</span><span class="mode-tag" style="text-transform:none;">${esc(myCourseHit[1].name||'')}</span>`;
+        slotEl.title = 'Il tuo corso: '+(myCourseHit[1].name||'');
       } else if(courseEntry){
         const [,c] = courseEntry;
         slotEl.className = 'slot blocked';
@@ -3432,7 +3446,7 @@ function renderCourts(host){
       } else if(recurringEntry){
         const [,r] = recurringEntry;
         const mineFixed = r.uid === state.uid;
-        slotEl.className = 'slot ' + (mineFixed ? 'mine' : 'taken');
+        slotEl.className = 'slot ' + ((state.isAdmin && r.mode==='sat') ? 'blocked' : (mineFixed ? 'mine' : 'taken')); // admin: la SAT ha lo stesso rosso dei corsi
         const recShift = r.half === true && (mineFixed || state.isAdmin);
         const rlabel = recShift ? hmFmt(h,true) : label;
         if(state.isAdmin){
@@ -3440,19 +3454,20 @@ function renderCourts(host){
           slotEl.innerHTML = `${rlabel}<span class="who nm">${esc(satLike ? (r.mode==='sat'?'SAT':'Corsi') : (shortPersonName(r.memberName)||'fisso'))}</span><span class="mode-tag" style="text-transform:none;">${esc(satLike && r.memberName && r.memberName!=='SAT' && r.memberName!=='Corsi' ? r.memberName : 'fisso')}</span>`;
           slotEl.title = 'Fisso · '+(r.memberName||'')+(r.teacherName ? ' · maestro '+r.teacherName : '');
           if(recShift) slotEl.title += ' · '+slotRange(court.id, state.selectedDate, h);
-        } else slotEl.innerHTML = `${rlabel}<span class="who">${mineFixed?'tuo fisso':'fisso'}</span>${recShift?'<span class="mode-tag">+30′</span>':''}`;
+        } else slotEl.innerHTML = `${rlabel}<span class="who">${mineFixed?'tu':'occupato'}</span>${recShift?'<span class="mode-tag">+30′</span>':''}`;
       } else if(bookingEntry){
         const [bid, b] = bookingEntry;
         const mine = !!state.myBookingIds[bid];
         const showShift = shiftedHere && (mine || state.isAdmin); // l'orario spostato lo vedono solo l'admin e chi ha prenotato
-        slotEl.className = 'slot ' + (mine ? 'mine' : 'taken') + (isPast?' past':'');
+        slotEl.className = 'slot ' + ((state.isAdmin && b.mode==='sat') ? 'blocked' : (mine ? 'mine' : 'taken')) + (isPast?' past':'');
         if(state.isAdmin){ // l'admin vede chi ha prenotato (maestro per le lezioni, socio per singolo/doppio), non il tipo di ora
           const aw = adminSlotWho(bid, b);
           const tagTxt = (aw.tag||'')+(showShift ? (aw.tag?' ':'')+'+30′' : '');
           slotEl.innerHTML = `${showShift ? hmFmt(h,true) : label}<span class="who nm">${esc(aw.who)}</span>${tagTxt ? `<span class="mode-tag" style="text-transform:none;">${esc(tagTxt)}</span>` : ''}`;
           slotEl.title = aw.title+(showShift ? ' · '+slotRange(court.id, state.selectedDate, h) : '');
         } else {
-          const modeTag = `<span class="mode-tag">${b.mode||''}${b.mode==='lezione'&&b.teacherName?' · '+b.teacherName:''}${showShift?' · +30′':''}</span>`;
+          // ogni socio vede solo la modalità delle proprie ore; per quelle degli altri solo "occupato"
+          const modeTag = mine ? `<span class="mode-tag">${b.mode||''}${b.mode==='lezione'&&b.teacherName?' · '+b.teacherName:''}${showShift?' · +30′':''}</span>` : '';
           slotEl.innerHTML = `${showShift ? hmFmt(h,true) : label}<span class="who">${mine?'tu':'occupato'}</span>${modeTag}`;
           if(showShift) slotEl.title = slotRange(court.id, state.selectedDate, h);
         }
@@ -3476,8 +3491,8 @@ function renderCourts(host){
         slotEl.innerHTML = `${label}<span class="who">chiuso</span>`;
         if(state.isAdmin) slotEl.title = 'Chiusura ricorrente'+(clo.label ? ': '+clo.label : '');
       } else if(afterRun){ // prima mezz'ora occupata dall'ora precedente spostata: per i soci è chiuso, l'admin vede il perché
-        slotEl.className = 'slot blocked' + (isPast?' past':'');
-        slotEl.innerHTML = `${label}<span class="who">${state.isAdmin ? 'dalle '+hmFmt(h,true) : 'chiuso'}</span>`;
+        slotEl.className = (state.isAdmin ? 'slot blocked' : 'slot taken') + (isPast?' past':'');
+        slotEl.innerHTML = `${label}<span class="who">${state.isAdmin ? 'dalle '+hmFmt(h,true) : 'occupato'}</span>`;
         if(state.isAdmin) slotEl.title = hmFmt(h)+'–'+hmFmt(h,true)+' occupata dall\'ora precedente spostata; '+hmFmt(h,true)+'–'+hmFmt(h+1)+' libera';
       } else if(isPast){
         slotEl.className = 'slot past'; slotEl.textContent = label;
@@ -3485,8 +3500,7 @@ function renderCourts(host){
         slotEl.className = 'slot past'; slotEl.textContent = label;
         slotEl.title = 'Prenotabile da '+MAX_ADVANCE_DAYS+' giorni prima';
       } else if(!state.isAdmin && adminOnlyHour(h)){
-        slotEl.className = 'slot blocked'; slotEl.innerHTML = `${label}<span class="who">riservato</span>`;
-        slotEl.title = 'Ora riservata alla segreteria';
+        slotEl.className = 'slot taken'; slotEl.innerHTML = `${label}<span class="who">occupato</span>`;
       } else {
         slotEl.className = 'slot free';
         if(shiftedHere && state.isAdmin){ slotEl.innerHTML = `${hmFmt(h,true)}<span class="mode-tag">+30′</span>`; slotEl.title = slotRange(court.id, state.selectedDate, h); }
