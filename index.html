@@ -265,7 +265,8 @@
   }
   @media (min-width: 900px){
     #app{ max-width:880px; }
-    .screen{ display:grid; grid-template-columns:1fr 1fr; align-items:start; gap:16px; }
+    .screen{ display:grid; grid-template-columns:1fr 1fr; align-items:start; align-content:start; gap:16px; }
+    .screen > .link{ grid-column: 1 / -1; }
     .screen > .card, .screen > #courseCards, .screen > #myAccountHost, .screen > #courtsHost, .screen > #loyaltyHost,
     .screen > #daysHost, .screen > .today-tally, .screen > .day-strip{ grid-column: 1 / -1; }
     .slot-row{ grid-template-columns:repeat(auto-fill,minmax(76px,1fr)); }
