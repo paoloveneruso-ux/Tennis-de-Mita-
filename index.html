@@ -3302,7 +3302,7 @@ function renderAdminDayPlan(host){ // solo admin: ore del giorno per campo, con 
       const bookEntry = Object.entries(state.bookingsPublic||{}).find(([_,b])=>b.courtId===court.id && b.date===date && b.hour===h);
       const cloEntry = closureEntryFor(court.id, date, h);
       let kind, label;
-      if(blockEntry){ kind = 'block'; label = 'Chiuso'; }
+      if(blockEntry){ kind = 'block:'+blockEntry[0]; label = 'Chiuso'; }
       else if(courseEntry){ kind = 'course:'+courseEntry[0]; label = 'Corso · '+(courseEntry[1].name||''); }
       else if(recEntry){ kind = 'rec:'+recEntry[0]; label = 'Fisso · '+(recEntry[1].memberName||''); }
       else if(bookEntry){
@@ -3328,8 +3328,12 @@ function renderAdminDayPlan(host){ // solo admin: ore del giorno per campo, con 
     sec.innerHTML = `<div class="pay-name" style="margin-bottom:4px;">${esc(court.name)}</div>`
       + (rows.length ? rows.map(r=> r.gap
         ? `<div class="list-row" style="opacity:.7;"><span>${minFmt(r.startMin)}–${minFmt(r.endMin)} · <span class="hint">mezz'ora libera</span></span><span class="pill">libera</span></div>`
-        : `<div class="list-row" style="flex-wrap:wrap;gap:4px 8px;"><div style="min-width:0;"><div><b>${minFmt(r.startMin)}–${minFmt(r.endMin)}</b></div><div class="hint">${esc(r.label)}</div></div><span class="pill${r.shifted?' rain':''}">${r.hours} ${r.hours===1?'ora':'ore'}${r.shifted?' · +30′':''}</span></div>`).join('')
+        : `<div class="list-row" style="flex-wrap:wrap;gap:4px 8px;"><div style="min-width:0;"><div><b>${minFmt(r.startMin)}–${minFmt(r.endMin)}</b></div><div class="hint">${esc(r.label)}</div></div><span class="pill${r.shifted?' rain':''}">${r.hours} ${r.hours===1?'ora':'ore'}${r.shifted?' · +30′':''}</span>${r.kind.startsWith('block:')?`<button class="btn-ghost small-btn" data-reopen="${esc(r.kind.slice(6))}">Riapri</button>`:''}</div>`).join('')
         : '<div class="hint">Nessuna ora occupata.</div>');
+    sec.querySelectorAll('[data-reopen]').forEach(btn=>{ btn.onclick = async () => {
+      if(!confirm('Riaprire questo slot chiuso?')) return;
+      try{ await remove(ref(db, cpath('blocks/'+btn.dataset.reopen))); toast('Slot riaperto'); }catch(e){ toast('Errore: '+e.message); }
+    }; });
     card.appendChild(sec);
   });
   host.replaceChildren(card);
@@ -3446,6 +3450,13 @@ function renderCourts(host){
       if(blockEntry){
         slotEl.className = 'slot blocked';
         slotEl.innerHTML = `${label}<span class="who">chiuso</span>`;
+        if(state.isAdmin){
+          slotEl.title = 'Tocca per riaprire questo slot';
+          slotEl.onclick = async () => {
+            if(!confirm('Riaprire '+label+' su '+court.name+' ('+fmtDateDisplay(state.selectedDate)+')?')) return;
+            try{ await remove(ref(db, cpath('blocks/'+blockEntry[0]))); toast('Slot riaperto'); }catch(e){ toast('Errore: '+e.message); }
+          };
+        }
       } else if(myCoursePresent){
         slotEl.className = 'slot mine' + (isPast?' past':'');
         slotEl.innerHTML = `${label}<span class="who">Corso</span><span class="mode-tag" style="text-transform:none;">${esc(myCourseHit[1].name||'')}</span>`;
