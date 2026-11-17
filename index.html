@@ -316,11 +316,14 @@ const MODES = [
 const ADMIN_ONLY_MODES = [
   {id:'sat', label:'SAT (scuola tennis)'},
   {id:'corsi', label:'Corsi (altro maestro)'},
+  {id:'torneo', label:'Torneo'},
 ];
 const ALL_MODES = [...MODES, ...ADMIN_ONLY_MODES];
 const modeLabel = id => (ALL_MODES.find(m=>m.id===id)||{}).label || id;
 
 const isAdminOnlyMode = id => ADMIN_ONLY_MODES.some(m=>m.id===id);
+const isGlobalRateMode = id => id==='sat' || id==='corsi'; // tariffa unica del circolo; il torneo ha la tariffa scelta a ogni inserimento
+const RATE_MODES = () => ALL_MODES.filter(m=>m.id!=='torneo'); // modalità con tariffa fissa nelle impostazioni
 
 /* ================= Raccolta punti: attivazione =================
    info.loyaltyEnabled (true/false) e info.loyaltyStartDate ("YYYY-MM-DD", facoltativa).
@@ -348,9 +351,9 @@ function adminSlotWho(bid, b){
   const pv = (state.bookingsPrivate||{})[bid] || {};
   const full = pv.memberName || '';
   if(b.mode === 'lezione') return { who: shortPersonName(b.teacherName) || 'Maestro', tag: shortPersonName(full), title: 'Lezione · maestro '+(b.teacherName||'?')+(full ? ' · '+full : '') };
-  if(b.mode === 'sat' || b.mode === 'corsi'){
+  if(b.mode === 'sat' || b.mode === 'corsi' || b.mode === 'torneo'){
     const rest = full.indexOf(' · ') >= 0 ? full.slice(full.indexOf(' · ')+3) : '';
-    return { who: b.mode==='sat' ? 'SAT' : 'Corsi', tag: rest, title: modeLabel(b.mode)+(rest ? ' · '+rest : '') };
+    return { who: b.mode==='sat' ? 'SAT' : b.mode==='torneo' ? 'Torneo' : 'Corsi', tag: rest, title: modeLabel(b.mode)+(rest ? ' · '+rest : '') };
   }
   return { who: shortPersonName(full) || 'Occupato', tag: '', title: (full || 'Occupato')+' · '+modeLabel(b.mode) };
 }
@@ -735,7 +738,7 @@ const state = {
   loyaltyAllConfirmed: {}, // popolato solo per admin (scansione fedeltà)
   confirmPartnerBid: null,
   recurringClosures: {}, // chiusure ricorrenti settimanali
-  satNote: '', showLoyaltyHistory: false,
+  satNote: '', teacherLessonMode: 'give', tourneyDesc: '', tourneyRate: '', showLoyaltyHistory: false,
   draftLoyaltyBands: null,
   adminLoyaltyScan: {}, // { [uid]: { confirmedCounts:{bandId:n}, redemptions:{bandId:n} } }
 };
@@ -967,8 +970,18 @@ function courseHourRate(c){
   return Number(((state.club||{}).rates||{}).sat) || 0;
 }
 function enrolleeLevel(c, e){ return (e && e.livello) ? e.livello : ((c && c.livello) || ''); }
-function courseDueSummary(course, payMap, billing, e){
+function courseDueSummary(course, payMap, billing, e, cid, eid){
   const fee = enrolleeFee(course, e);
+  if(isPP(e) && cid && eid){
+    loadCourseAttendanceAll(cid); if(state.isAdmin || state.isTeacher) loadCourseRecoveries(cid);
+    const pm = (payMap && payMap._pp) || {};
+    const keys = Object.keys(pm).filter(k=>pm[k]);
+    const methods = new Set(); let paid = 0, exempt = 0, paidAmount = 0;
+    keys.forEach(k=>{ const x = pm[k]; if(x.m==='exempt') exempt++; else { paid++; methods.add(x.m||'?'); paidAmount += Number(x.a!=null ? x.a : fee) || 0; } });
+    const presences = ppPresences(cid, eid), earned = Math.floor(presences/PP_PACK), due = Math.max(0, earned-keys.length);
+    return { blocks:[], months:[], due, paid, paidAmount, exempt, dueMonths:[], methods, fee, billing:'monthly', dueAmount: due*fee,
+      pp:{ presences, earned, paidPacks:keys.length, duePacks:due, paidKeys:keys, toNext: (earned+1)*PP_PACK - presences } };
+  }
   const blocks = billingBlocks(course, billing);
   const months = blocks.flat();
   const s = { blocks, months, due:0, paid:0, paidAmount:0, exempt:0, dueMonths:[], methods:new Set(), fee, billing: billing==='monthly' ? 'monthly' : 'bimonthly' };
@@ -984,6 +997,7 @@ function courseDueSummary(course, payMap, billing, e){
   return s;
 }
 function payPill(s){
+  if(s.pp){ if(s.due>0) return { label:'Da pagare € '+fmtEuro(s.dueAmount), style:'color:var(--danger);border-color:var(--danger);' }; return { label:'A presenze · '+s.pp.presences, style:'' }; }
   if(s.due>0) return { label:'Da pagare € '+fmtEuro(s.dueAmount), style:'color:var(--danger);border-color:var(--danger);' };
   if(!s.months.length) return { label:'Non ancora dovuto', style:'color:var(--ink-dim);' };
   if(s.paid===0) return { label:'Esente', style:'' };
@@ -1015,6 +1029,34 @@ async function setBilling(cid, eid, mode){
   catch(err){ toast('Errore: '+err.message); }
 }
 
+async function setPPPayment(cid, eid, key, method){ // method: 'cash' | 'card' | 'exempt' | null (annulla)
+  const fee = enrolleeFee(state.courses[cid]||{}, getEnrollment(cid, eid));
+  try{ await update(ref(db, cpath('coursePayments/'+cid+'/'+eid)), { ['_pp/'+key]: method ? { m:method, t:Date.now(), a: method==='exempt' ? 0 : fee } : null }); }
+  catch(err){ toast('Errore: '+err.message); }
+}
+function buildPPPayBlock(r){ // corsista a presenze: contatore, pacchetti da pagare e già pagati
+  const pp = r.s.pp, box = document.createElement('div');
+  box.innerHTML = `<div class="list-row"><span>Presenze (lezioni svolte + recuperi)</span><span class="pill">${pp.presences}</span></div>
+    <div class="hint" style="margin:6px 0;">Pacchetti da ${PP_PACK}: maturati ${pp.earned} · pagati ${pp.paidPacks}${pp.duePacks>0 ? ' · <b style="color:var(--danger);">da pagare '+pp.duePacks+'</b>' : ''} · prossimo a ${(pp.earned+1)*PP_PACK} presenze (mancano ${pp.toNext}).</div>`;
+  const nextKey = () => { let i = 1; while(r.payMap._pp && r.payMap._pp['p'+i]) i++; return 'p'+i; };
+  const used = new Set(pp.paidKeys);
+  for(let k=0; k<pp.duePacks; k++){
+    let i = 1; while(used.has('p'+i)) i++; const key = 'p'+i; used.add(key);
+    const row = document.createElement('div'); row.className = 'pay-month';
+    row.innerHTML = `<span>Pacchetto n. ${pp.paidPacks+k+1} · € ${fmtEuro(r.s.fee)}</span>`;
+    const wrap = document.createElement('div'); wrap.className = 'pay-opts g4';
+    [['cash','Contanti'],['card','Carta'],['exempt','Esente']].forEach(([m,txt])=>{ const b = document.createElement('button'); b.className = 'small-btn'; b.textContent = txt; b.onclick = () => setPPPayment(r.cid, r.eid, key, m); wrap.appendChild(b); });
+    row.appendChild(wrap); box.appendChild(row);
+  }
+  pp.paidKeys.slice().sort((a,b)=>parseInt(a.slice(1))-parseInt(b.slice(1))).forEach(k=>{
+    const x = r.payMap._pp[k];
+    const row = document.createElement('div'); row.className = 'list-row'; row.style.flexWrap = 'wrap';
+    row.innerHTML = `<span>Pacchetto ${esc(k.slice(1))} · ${x.m==='exempt' ? 'esente' : '€ '+fmtEuro(x.a!=null?x.a:r.s.fee)+' · '+(METHOD_LABEL[x.m]||x.m)} · ${new Date(x.t).toLocaleDateString('it-IT',{day:'2-digit',month:'2-digit'})}</span>`;
+    const b = document.createElement('button'); b.className = 'small-btn'; b.textContent = 'Annulla'; b.onclick = () => { if(confirm('Annullare questo pagamento?')) setPPPayment(r.cid, r.eid, k, null); };
+    row.appendChild(b); box.appendChild(row);
+  });
+  return box;
+}
 /* Dettaglio pagamenti di un corsista (solo admin): modalità, blocchi da pagare, azioni rapide */
 function buildPayDetail(r, repaint){
   const s = r.s;
@@ -1023,14 +1065,16 @@ function buildPayDetail(r, repaint){
   det.className = 'pay-detail';
   const info = document.createElement('div');
   info.className = 'hint'; info.style.marginBottom = '6px';
-  info.textContent = 'Quota € '+fmtEuro(s.fee)+'/mese'+(monthly ? '' : ' · € '+fmtEuro(s.fee*2)+' ogni 2 mesi')+(r.e.phone ? ' · '+r.e.phone : '');
+  info.textContent = s.pp ? 'A presenze · € '+fmtEuro(s.fee)+' ogni '+PP_PACK+' presenze'+(r.e.phone ? ' · '+r.e.phone : '') : 'Quota € '+fmtEuro(s.fee)+'/mese'+(monthly ? '' : ' · € '+fmtEuro(s.fee*2)+' ogni 2 mesi')+(r.e.phone ? ' · '+r.e.phone : '');
   det.appendChild(info);
   { // quota e livello personalizzati di questo iscritto
     const box = document.createElement('div');
     box.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:2px 0 10px;align-items:end;';
     const levelOpts = LEVELS_ALL.map(l=>`<option value="${l}" ${r.e.livello===l?'selected':''}>${l}</option>`).join('');
     box.innerHTML = `
-      <div><div class="hint" style="margin-bottom:4px;">Quota mensile (€)</div>
+      <div style="grid-column:1 / -1;"><div class="hint" style="margin-bottom:4px;">Tariffa</div>
+        <select class="enr-pp"><option value="">A mensile / bimestrale</option><option value="1" ${isPP(r.e)?'selected':''}>A presenze (assente di default · 1 mensile ogni ${PP_PACK} presenze)</option></select></div>
+      <div><div class="hint" style="margin-bottom:4px;">${isPP(r.e)?'Quota ogni '+PP_PACK+' presenze (€)':'Quota mensile (€)'}</div>
         <input type="number" min="0" step="1" inputmode="decimal" placeholder="${esc(String(Number(r.c.monthlyFee)||0))}" value="${r.e.fee!=null && r.e.fee!=='' ? esc(String(r.e.fee)) : ''}" class="enr-fee"></div>
       <div><div class="hint" style="margin-bottom:4px;">Livello</div>
         <select class="enr-level"><option value="">Come il corso${r.c.livello?' ('+esc(r.c.livello)+')':''}</option>${levelOpts}</select></div>
@@ -1050,7 +1094,7 @@ function buildPayDetail(r, repaint){
           const olds = [...new Set(stale.map(m=>Number(pm._meta[m].a)))].map(fmtEuro).join(' / ');
           fixPaid = confirm('Questo corsista ha '+stale.length+(stale.length===1?' mese già pagato':' mesi già pagati')+' registrati a € '+olds+'.\n\nOK = aggiorna anche questi importi a € '+fmtEuro(newFee)+' (cambiano anche gli Incassi del mese in cui li hai incassati).\nAnnulla = la nuova quota vale solo per i mesi ancora da pagare.');
         }
-        await update(ref(db, cpath('courseEnrollments/'+r.cid+'/'+r.eid)), { fee: feeRaw==='' ? null : Number(feeRaw), livello: lvl || null });
+        await update(ref(db, cpath('courseEnrollments/'+r.cid+'/'+r.eid)), { fee: feeRaw==='' ? null : Number(feeRaw), livello: lvl || null, perPresenza: box.querySelector('.enr-pp').value==='1' ? true : null });
         if(fixPaid){
           const u = {}; stale.forEach(m=>{ u['_meta/'+m+'/a'] = newFee; });
           await update(ref(db, cpath('coursePayments/'+r.cid+'/'+r.eid)), u);
@@ -1060,6 +1104,7 @@ function buildPayDetail(r, repaint){
     };
     det.appendChild(box);
   }
+  if(s.pp){ det.appendChild(buildPPPayBlock(r)); return det; }
   const lab = document.createElement('div');
   lab.className = 'hint'; lab.textContent = 'Modalità di pagamento';
   det.appendChild(lab);
@@ -1191,11 +1236,16 @@ function collectPayments(){
         g.amount += Number(mt.a!=null ? mt.a : enrolleeFee(c, (state.courseEnrollments[cid]||{})[eid])) || 0;
         g.months.push(m);
       });
+      Object.entries(payMap._pp || {}).forEach(([k, x])=>{ // pacchetti a presenze
+        if(!x || (x.m!=='cash' && x.m!=='card') || !x.t) return;
+        const key = cid+'|'+eid+'|pp|'+k;
+        groups[key] = { cid, eid, t:x.t, method:x.m, amount:Number(x.a!=null ? x.a : enrolleeFee(c, (state.courseEnrollments[cid]||{})[eid])) || 0, months:[], pp:true, ym: ymOfTs(x.t) };
+      });
     });
   });
   const list = Object.values(groups);
   list.forEach(g=>{
-    g.months.sort();
+    g.months.sort(); if(g.pp) g.label = 'Pacchetto a presenze ('+PP_PACK+')';
     const e = ((state.courseEnrollments[g.cid]||{})[g.eid]) || {};
     g.name = e.name || '—';
     g.courseName = (state.courses[g.cid]||{}).name || '';
@@ -1310,7 +1360,7 @@ function renderIncassiScreen(host){
   inMonth.forEach(g=>{
     const row = document.createElement('div'); row.className = 'pay-row';
     const when = new Date(g.t).toLocaleDateString('it-IT',{day:'2-digit',month:'2-digit'});
-    row.innerHTML = `<div class="pay-head" style="cursor:default;"><div style="min-width:0;"><div class="pay-name">${esc(g.name)}</div><div class="hint">${esc(g.courseName)} · ${esc(fmtBlock(g.months))} · ${when}</div></div><span class="pill">€ ${fmtEuro(g.amount)} · ${METHOD_LABEL[g.method]}</span></div>`;
+    row.innerHTML = `<div class="pay-head" style="cursor:default;"><div style="min-width:0;"><div class="pay-name">${esc(g.name)}</div><div class="hint">${esc(g.courseName)} · ${esc(g.pp ? g.label : fmtBlock(g.months))} · ${when}</div></div><span class="pill">€ ${fmtEuro(g.amount)} · ${METHOD_LABEL[g.method]}</span></div>`;
     lHost.appendChild(row);
   });
 
@@ -1367,7 +1417,7 @@ function renderPaymentsScreen(host){
     const pill = payPill(s);
     const el = document.createElement('div');
     el.className = 'pay-row';
-    el.innerHTML = `<div class="pay-head"><div style="min-width:0;"><div class="pay-name">${esc(r.name)}</div><div class="hint">${esc(r.c.name)}${r.e.billing==='monthly'?' · mensile':' · bimestrale'}${s.due>0?' · '+s.due+(s.due===1?' mese':' mesi'):''}</div></div><span class="pill" style="${pill.style}">${pill.label}</span></div>`;
+    el.innerHTML = `<div class="pay-head"><div style="min-width:0;"><div class="pay-name">${esc(r.name)}</div><div class="hint">${esc(r.c.name)}${s.pp ? ' · a presenze ('+s.pp.presences+')' : (r.e.billing==='monthly'?' · mensile':' · bimestrale')}${s.due>0?' · '+s.due+(s.pp ? (s.due===1?' pacchetto':' pacchetti') : (s.due===1?' mese':' mesi')):''}</div></div><span class="pill" style="${pill.style}">${pill.label}</span></div>`;
     el.querySelector('.pay-head').onclick = () => {
       if(state.payExpanded[r.key]) delete state.payExpanded[r.key]; else state.payExpanded[r.key] = true;
       repaint();
@@ -1384,7 +1434,7 @@ function renderPaymentsScreen(host){
       const pays = state.coursePayments[cid] || {};
       Object.entries(enr).forEach(([eid,e])=>{
         const payMap = pays[eid] || {};
-        all.push({ key:cid+'|'+eid, cid, eid, c, e, payMap, s:courseDueSummary(c, payMap, e.billing, e), name:e.name||'—' });
+        all.push({ key:cid+'|'+eid, cid, eid, c, e, payMap, s:courseDueSummary(c, payMap, e.billing, e, cid, eid), name:e.name||'—' });
       });
     });
     const totDue = all.reduce((a,r)=>a+r.s.dueAmount, 0);
@@ -1466,6 +1516,30 @@ function attendanceCutoff(date, hour){
 /* Presenza per ORA. Formato nel database, per corsista e giorno:
    - vecchio: true/false  -> vale per tutte le ore di quel giorno
    - nuovo:   { h10: false, h11: true } -> una voce per ogni ora (ora mancante = presente) */
+/* ===== Tariffa a presenze =====
+   courseEnrollments/{cid}/{eid}/perPresenza = true: il corsista è ASSENTE di default (compare presente solo se segnato) e paga un "mensile"
+   ogni PP_PACK presenze. Contano le sue lezioni segnate presenti (già svolte) + i recuperi in altri corsi confermati dal maestro.
+   Pagamenti: coursePayments/{cid}/{eid}/_pp = { p1:{m:'cash'|'card'|'exempt', t, a}, ... } (un record per ogni pacchetto pagato). */
+const PP_PACK = 8;
+const isPP = e => !!(e && e.perPresenza===true);
+function attPresent(raw, hour, e){ const v = attGet(raw, hour); return isPP(e) ? v===true : v!==false; }
+function ppPresences(cid, eid){
+  const course = state.courses[cid] || {}, e = getEnrollment(cid, eid);
+  const today = todayKey(), nowH = new Date().getHours();
+  const done = (date, hour) => date < today || (date===today && (hour==null || hour <= nowH));
+  let n = 0;
+  Object.entries(state.courseAttendanceByCourse[cid] || {}).forEach(([date, dm])=>{
+    const raw = dm && dm[eid];
+    if(raw===true){ if(date<=today) n += (enrolleeCourseHoursOn(course, e, date).length || 1); }
+    else if(raw && typeof raw==='object'){
+      Object.keys(raw).forEach(k=>{ if(/^h\d+$/.test(k) && raw[k]===true && done(date, parseInt(k.slice(1),10))) n++; });
+    }
+  });
+  Object.values(((state.courseRecoveries||{})[cid]||{})[eid] || {}).forEach(r=>{
+    if(r && r.status==='present' && (r.toDate ? done(r.toDate, r.toHour) : true)) n++;
+  });
+  return n;
+}
 function attGet(raw, hour){
   if(raw===true || raw===false) return raw;
   if(raw && typeof raw==='object'){ const v = raw['h'+hour]; return (v===true || v===false) ? v : undefined; }
@@ -1599,6 +1673,7 @@ function courseHoursOn(course, date){
   return [...new Set(getCourseSessions(course).filter(x=>x.weekday===dow).map(x=>x.hour))].sort((a,b)=>a-b); // un'ora con due campi vale una volta sola
 }
 function attAbsentCount(course, date, raw, e){ // ore di assenza del corsista in quel giorno
+  if(isPP(e)) return 0; // a presenze: non ha assenze da recuperare
   if(raw===false) return (e ? enrolleeCourseHoursOn(course, e, date) : courseHoursOn(course, date)).length || 1;
   if(raw && typeof raw==='object') return Object.values(raw).filter(v=>v===false).length;
   return 0;
@@ -1996,7 +2071,7 @@ function renderWeekAttendanceCard(host){
         <button id="weekAttNext" aria-label="Settimana successiva">›</button>
       </div>
     </div>
-    <div class="wk-info">Sei presente di default. Se non puoi venire, tocca <b>Non ci sarò</b> entro le ${cutoffTxt} del giorno della lezione.</div>
+    <div class="wk-info">${Object.keys(state.myEnrollments||{}).some(c=>isPP(state.myEnrollmentData[c])) ? 'Con la tariffa a presenze risulti <b>assente</b> finché non tocchi <b>Ci sarò</b> (entro le '+cutoffTxt+' del giorno della lezione): le presenze confermate si contano per il pagamento.' : 'Sei presente di default. Se non puoi venire, tocca <b>Non ci sarò</b> entro le '+cutoffTxt+' del giorno della lezione.'}</div>
     <div id="weekAttDays"></div>`;
   const daysHost = card.querySelector('#weekAttDays');
   const todayStr = dateKey(now);
@@ -2014,7 +2089,8 @@ function renderWeekAttendanceCard(host){
     const lessonsEl = dayEl.querySelector('.wk-lessons');
     dayLessons.forEach(l=>{
       const st = attGet(state.myAttendance[l.cid+'|'+l.date], l.hour);
-      const absent = st === false;
+      const ppMe = isPP(state.myEnrollmentData[l.cid]);
+      const absent = ppMe ? st !== true : st === false;
       const rainDay = attRain(state.myAttendance[l.cid+'|'+l.date], l.hour);
       const open = now < attendanceCutoff(l.date, l.hour);
       const court = ((state.club.courts||[]).find(x=>x.id===l.courtId)||{}).name || '';
@@ -2029,7 +2105,7 @@ function renderWeekAttendanceCard(host){
         act.appendChild(badge);
       } else if(open){
         if(absent){
-          const badge = document.createElement('span'); badge.className = 'wk-badge abs'; badge.textContent = 'Assente';
+          const badge = document.createElement('span'); badge.className = 'wk-badge abs'; badge.textContent = ppMe ? 'Da confermare' : 'Assente';
           act.appendChild(badge);
         }
         const btn = document.createElement('button');
@@ -2095,6 +2171,7 @@ function enrolleeBacklog(fromCid, eid){
   let absences = 0, rain = 0;
   const fromCourse = state.courses[fromCid];
   const fromE = getEnrollment(fromCid, eid);
+  if(isPP(fromE)){ const rc = Object.values(((state.courseRecoveries[fromCid]||{})[eid])||{}).filter(r=>r && r.status==='present').length; return { absences:0, recovered:rc, owed:0, rain:0, rainOwed:0 }; }
   Object.entries(hist).forEach(([date,dm])=>{ if(dm){ absences += attAbsentCount(fromCourse, date, dm[eid], fromE); rain += attRainCount(dm[eid]); } });
   const recs = (state.courseRecoveries[fromCid] || {})[eid] || {};
   const recovered = Object.values(recs).filter(r=>r && r.status==='present').length;
@@ -2120,8 +2197,10 @@ function lessonHoles(cid, date, hour, courtId){
   const day = (state.courseAttendanceByCourse[cid] || {})[date] || {};
   const enrs = state.courseEnrollments[cid];
   const dow = new Date(date+'T00:00:00').getDay();
-  const absent = Object.entries(day).filter(([eid,v])=>{
+  const ppAbsent = (hour!==undefined && enrs) ? Object.entries(enrs).filter(([eid,e])=> isPP(e) && enrolleeAttendsSession(e, dow, hour, courtId) && attGet(day[eid], hour)!==true).length : 0; // a presenze: il posto è libero se non si è segnato presente
+  const absent = ppAbsent + Object.entries(day).filter(([eid,v])=>{
     const e = enrs ? enrs[eid] : undefined;
+    if(isPP(e)) return false;
     if(hour!==undefined && e && !enrolleeAttendsSession(e, dow, hour, courtId)) return false; // non è una sua ora/campo
     return hour===undefined ? attAbsentCount(c,date,v,e)>0 : attGet(v,hour)===false;
   }).length;
@@ -2176,7 +2255,7 @@ function recoveryCandidates(toCid, date, hour, courtId){
       const pk = personKey(e); if(pk && busyPeople.has(pk)) return;
       const bl = enrolleeBacklog(cid2, eid);
       const elv = enrolleeLevel(c2, e);
-      out.push({ fromCid:cid2, fromEid:eid, e, c:c2, owed:bl.owed, rain:bl.rain, rainOwed:bl.rainOwed, level: elv, sameLevel: normTxt(elv).trim()===lvl, name:e.name||'—' });
+      out.push({ fromCid:cid2, fromEid:eid, e, c:c2, pp:isPP(e), ppN: isPP(e) ? ppPresences(cid2, eid) : 0, owed:bl.owed, rain:bl.rain, rainOwed:bl.rainOwed, level: elv, sameLevel: normTxt(elv).trim()===lvl, name:e.name||'—' });
     });
   });
   return out;
@@ -2246,7 +2325,8 @@ function attendanceButtons(cid, date, eid, cur, hour){
   [[true,'Presente','on-paid'],[false,'Assente','on-due']].forEach(([val,lab,cls])=>{
     const b = document.createElement('button');
     const curH = attGet(cur, hour);
-    const effective = (curH===undefined) ? true : curH; // default: presente
+    const enrB = (state.courseEnrollments[cid]||{})[eid];
+    const effective = (curH===undefined) ? !isPP(enrB) : curH; // default: presente (assente per chi paga a presenze)
     b.className = 'small-btn' + (effective===val ? ' '+cls : '');
     b.style.padding = '6px 10px'; b.style.fontSize = '11px';
     b.textContent = lab;
@@ -2360,8 +2440,8 @@ function buildRecoveryPanel(cid, date, hour, courtId){
     const all = recoveryCandidates(cid, date, hour, courtId);
     let rows;
     if(q) rows = all.filter(x=>normTxt(x.name).includes(q));           // ricerca manuale: qualsiasi livello, anche senza ore da recuperare
-    else if(state.recoAll) rows = all.filter(x=>x.owed>0);
-    else rows = all.filter(x=>x.sameLevel && x.owed>0);                // default: stesso livello con ore da recuperare
+    else if(state.recoAll) rows = all.filter(x=>x.owed>0 || x.pp);
+    else rows = all.filter(x=>x.sameLevel && (x.owed>0 || x.pp));                // default: stesso livello con ore da recuperare
     rows.sort((a,b)=>
       ((skipped[a.fromCid+'|'+a.fromEid]?1:0) - (skipped[b.fromCid+'|'+b.fromEid]?1:0)) ||
       ((b.sameLevel?1:0) - (a.sameLevel?1:0)) || (b.rainOwed - a.rainOwed) || (b.owed - a.owed) || a.name.localeCompare(b.name,'it'));
@@ -2373,7 +2453,7 @@ function buildRecoveryPanel(cid, date, hour, courtId){
     const phone = enrolleePhone(cd.e);
     const row = document.createElement('div');
     row.className = 'reco-row' + (isSkipped ? ' skipped' : '');
-    row.innerHTML = `<div class="pay-head" style="cursor:default;"><div style="min-width:0;"><div class="pay-name">${esc(cd.name)}${isFirst&&!isSkipped?' <span class="pill" style="padding:2px 7px;">prossimo consigliato</span>':''}</div><div class="hint">${esc(cd.c.name)} · livello ${esc(cd.level||cd.c.livello||'-')}${cd.sameLevel?'':' · <b>altro livello</b>'}${isSkipped?' · saltato':''}</div></div><span class="pill" style="${cd.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${cd.owed>0?cd.owed+(cd.owed===1?' ora':' ore')+' da recuperare'+(cd.rainOwed>0?' ('+cd.rainOwed+' pioggia)':''):'nessuna ora da recuperare'}</span></div>`;
+    row.innerHTML = `<div class="pay-head" style="cursor:default;"><div style="min-width:0;"><div class="pay-name">${esc(cd.name)}${isFirst&&!isSkipped?' <span class="pill" style="padding:2px 7px;">prossimo consigliato</span>':''}</div><div class="hint">${esc(cd.c.name)} · livello ${esc(cd.level||cd.c.livello||'-')}${cd.sameLevel?'':' · <b>altro livello</b>'}${isSkipped?' · saltato':''}</div></div><span class="pill" style="${cd.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${cd.owed>0?cd.owed+(cd.owed===1?' ora':' ore')+' da recuperare'+(cd.rainOwed>0?' ('+cd.rainOwed+' pioggia)':''):(cd.pp ? 'a presenze · '+cd.ppN+' presenze' : 'nessuna ora da recuperare')}</span></div>`;
     const acts = document.createElement('div'); acts.className = 'reco-actions';
     const wa = document.createElement('button'); wa.className = 'btn-ghost reco-wa'; wa.style.cssText = 'padding:10px;font-size:12px;';
     wa.textContent = phone ? 'Invia messaggio' : 'Nessun numero';
@@ -2386,7 +2466,7 @@ function buildRecoveryPanel(cid, date, hour, courtId){
     pr.onclick = () => {
       const msg = cd.owed>0
         ? 'Confermi la presenza di '+cd.name+'? Verrà recuperata in automatico 1 assenza arretrata.'
-        : cd.name+' non ha ore da recuperare: registrare comunque la presenza?';
+        : cd.pp ? 'Confermi la presenza di '+cd.name+'? Conta come presenza del suo pacchetto.' : cd.name+' non ha ore da recuperare: registrare comunque la presenza?';
       if(confirm(msg)) setRecovery(cd, cid, date, 'present', hour, courtId);
     };
     const ab = document.createElement('button'); ab.className = 'small-btn'; ab.textContent = 'Assente';
@@ -3155,21 +3235,22 @@ async function bookSlot(court, hour, targetInfo){
   try{
     await set(ref(db, cpath('bookingsPrivate/'+bid)), {
       courtId:court.id, date:state.selectedDate, hour, mode:state.selectedMode,
-      rate: state.club.rates[state.selectedMode], memberId: targetInfo.memberId||null, memberName: targetInfo.memberName,
+      rate: (typeof targetInfo.rate==='number' ? targetInfo.rate : state.club.rates[state.selectedMode]), memberId: targetInfo.memberId||null, memberName: targetInfo.memberName,
       uid: targetInfo.uid||null, teacherUid, teacherName, createdAt: Date.now()
-    , ...(teacherXid ? { teacherXid } : {}) });
+    , ...(teacherXid ? { teacherXid } : {}), ...(targetInfo.byTeacher ? { bookedBy: state.uid } : {}) });
     if(targetInfo.uid) await set(ref(db, cpath('myBookings/'+targetInfo.uid+'/'+bid)), true);
     await set(ref(db, cpath('bookingsPublic/'+bid)), { courtId:court.id, date:state.selectedDate, hour, mode:state.selectedMode, teacherUid, teacherName, ...(teacherXid ? { teacherXid } : {}) });
     if(teacherUid){
       await set(ref(db, cpath('myTeachingBookings/'+teacherUid+'/'+bid)), {
         date: state.selectedDate, hour, courtId: court.id, courtName: court.name,
-        clientName: targetInfo.memberName, rate: state.club.rates[state.selectedMode], createdAt: Date.now()
+        clientName: targetInfo.memberName, rate: state.club.rates[state.selectedMode], createdAt: Date.now(),
+        ...(targetInfo.byTeacher ? { byTeacher: true, pupilUid: targetInfo.uid||null } : {})
       });
     }
     if(state.isAdmin){
       writeAuditLog({
         type:'prenotazione', forMemberName: targetInfo.memberName, courtId: court.id, courtName: court.name,
-        date: state.selectedDate, hour, mode: state.selectedMode
+        date: state.selectedDate, hour, mode: state.selectedMode, ...(typeof targetInfo.rate==='number' ? { rate: targetInfo.rate } : {})
       });
     }
     toast('Campo prenotato: '+(isHalfShifted(court.id, state.selectedDate, hour) ? slotRange(court.id, state.selectedDate, hour)+' (orario spostato)' : String(hour).padStart(2,'0')+':00')+' · '+modeLabel(state.selectedMode)+(targetInfo.uid!==state.uid?' · '+targetInfo.memberName:''));
@@ -3376,8 +3457,11 @@ function renderCourts(host){
         ${MODES.map(m=>`<button data-mode="${m.id}" class="${state.selectedMode===m.id?'sel':''}">${m.label}${state.isAdmin?`<br><span style="opacity:.7;">€ ${state.club.rates[m.id]}/h</span>`:''}</button>`).join('')}
       </div>
       ${state.isAdmin ? `<div class="mode-choice" id="modeChoiceAdmin" style="margin-top:8px;">${ADMIN_ONLY_MODES.map(m=>`<button data-mode="${m.id}" class="${state.selectedMode===m.id?'sel':''}">${m.label}<br><span style="opacity:.7;">${modeRateTxt(m.id)} · solo admin</span></button>`).join('')}</div>` : ''}
-      ${isAdminOnlyMode(state.selectedMode) ? `<div class="field" style="margin-top:8px;"><label>Nota (facoltativa): gruppo, maestro…</label><input id="satNoteInput" value="${esc(state.satNote)}" placeholder="Es. Gruppo bambini"></div><div class="hint" style="margin-top:6px;">Ora non intestata a un socio: non conta per i punti e non entra nello storico di nessuno.</div>` : ''}
-      ${state.selectedMode==='lezione' ? `<div class="hint" style="margin-top:8px;">${state.isAdmin ? 'Toccando l\'ora libera scegli il maestro (anche non registrato, o aggiungine uno nuovo) e inserisci il nome di chi fa la lezione, obbligatorio.' : "Il maestro si sceglie al momento di toccare l'ora libera: vedrai solo quelli disponibili in quello slot."}</div>` : ''}
+      ${state.selectedMode==='torneo' ? `<div class="field" style="margin-top:8px;"><label>Descrizione del torneo (obbligatoria)</label><input id="tourneyDescInput" value="${esc(state.tourneyDesc)}" placeholder="Es. Torneo sociale di Natale · quarti"></div><div class="field" style="margin-top:8px;"><label>Tariffa oraria del torneo (€/h, obbligatoria)</label><input id="tourneyRateInput" type="number" inputmode="decimal" min="0" step="0.5" value="${esc(String(state.tourneyRate))}" placeholder="Es. 12"></div><div class="hint" style="margin-top:6px;">Ora non intestata a un socio: non conta per i punti. La tariffa vale per le ore che prenoti da ora, poi puoi cambiarla per il prossimo torneo.</div>` : isAdminOnlyMode(state.selectedMode) ? `<div class="field" style="margin-top:8px;"><label>Nota (facoltativa): gruppo, maestro…</label><input id="satNoteInput" value="${esc(state.satNote)}" placeholder="Es. Gruppo bambini"></div><div class="hint" style="margin-top:6px;">Ora non intestata a un socio: non conta per i punti e non entra nello storico di nessuno.</div>` : ''}
+      ${state.selectedMode==='lezione' && state.isTeacher && !state.isAdmin ? `<div class="mode-choice" id="teacherLessonChoice" style="margin-top:8px;">
+        <button data-tl="give" class="${state.teacherLessonMode==='give'?'sel':''}">Lezione che do io<br><span style="opacity:.7;">scegli l'allievo</span></button>
+        <button data-tl="take" class="${state.teacherLessonMode==='take'?'sel':''}">Lezione per me<br><span style="opacity:.7;">con un altro maestro</span></button></div>` : ''}
+      ${state.selectedMode==='lezione' && !(state.isTeacher && !state.isAdmin && state.teacherLessonMode==='give') ? `<div class="hint" style="margin-top:8px;">${state.isAdmin ? 'Toccando l\'ora libera scegli il maestro (anche non registrato, o aggiungine uno nuovo) e inserisci il nome di chi fa la lezione, obbligatorio.' : "Il maestro si sceglie al momento di toccare l'ora libera: vedrai solo quelli disponibili in quello slot."}</div>` : ''}
     </div>
     <div class="day-strip" id="dayStrip"></div>
     <div id="courtsHost"></div>
@@ -3388,6 +3472,9 @@ function renderCourts(host){
 
   const satNoteEl = screen.querySelector('#satNoteInput');
   if(satNoteEl) satNoteEl.oninput = (e)=>{ state.satNote = e.target.value; };
+  screen.querySelectorAll('#teacherLessonChoice button').forEach(b=>{ b.onclick = () => { state.teacherLessonMode = b.dataset.tl; renderApp(); }; });
+  const tdEl = screen.querySelector('#tourneyDescInput'); if(tdEl) tdEl.oninput = (e)=>{ state.tourneyDesc = e.target.value; };
+  const trEl = screen.querySelector('#tourneyRateInput'); if(trEl) trEl.oninput = (e)=>{ state.tourneyRate = e.target.value; };
   if(state.isAdmin && screen.querySelector('#bookForSelect')){
     screen.querySelector('#bookForSelect').onchange = (e)=>{ state.bookingForTarget = e.target.value; renderApp(); };
     const guestInput = screen.querySelector('#bookForGuestName');
@@ -3446,7 +3533,7 @@ function renderCourts(host){
           && enrolleeAttendsSession((state.myEnrollmentData||{})[cid], dowS, h, court.id));
         if(myCourseHit) loadMyAttendance(myCourseHit[0], state.selectedDate, state.myEnrollments[myCourseHit[0]]);
       }
-      const myCoursePresent = !!myCourseHit && attGet(state.myAttendance[myCourseHit[0]+'|'+state.selectedDate], h) !== false;
+      const myCoursePresent = !!myCourseHit && attPresent(state.myAttendance[myCourseHit[0]+'|'+state.selectedDate], h, state.myEnrollmentData[myCourseHit[0]]);
 
       if(blockEntry){
         slotEl.className = 'slot blocked';
@@ -3470,7 +3557,7 @@ function renderCourts(host){
       } else if(recurringEntry){
         const [,r] = recurringEntry;
         const mineFixed = r.uid === state.uid;
-        slotEl.className = 'slot ' + ((state.isAdmin && r.mode==='sat') ? 'blocked' : (mineFixed ? 'mine' : 'taken')); // admin: la SAT ha lo stesso rosso dei corsi
+        slotEl.className = 'slot ' + ((state.isAdmin && (r.mode==='sat'||r.mode==='torneo')) ? 'blocked' : (mineFixed ? 'mine' : 'taken')); // admin: la SAT ha lo stesso rosso dei corsi
         const recShift = r.half === true && (mineFixed || state.isAdmin);
         const rlabel = recShift ? hmFmt(h,true) : label;
         if(state.isAdmin){
@@ -3483,7 +3570,7 @@ function renderCourts(host){
         const [bid, b] = bookingEntry;
         const mine = !!state.myBookingIds[bid];
         const showShift = shiftedHere && (mine || state.isAdmin); // l'orario spostato lo vedono solo l'admin e chi ha prenotato
-        slotEl.className = 'slot ' + ((state.isAdmin && b.mode==='sat') ? 'blocked' : (mine ? 'mine' : 'taken')) + (isPast?' past':'');
+        slotEl.className = 'slot ' + ((state.isAdmin && (b.mode==='sat'||b.mode==='torneo')) ? 'blocked' : (mine ? 'mine' : 'taken')) + (isPast?' past':'');
         if(state.isAdmin){ // l'admin vede chi ha prenotato (maestro per le lezioni, socio per singolo/doppio), non il tipo di ora
           const aw = adminSlotWho(bid, b);
           const tagTxt = (aw.tag||'')+(showShift ? (aw.tag?' ':'')+'+30′' : '');
@@ -3509,7 +3596,7 @@ function renderCourts(host){
             }
           };
         }
-      } else if(closureEntryFor(court.id, state.selectedDate, h)){ // chiusura ricorrente del circolo
+      } else if(!state.isAdmin && closureEntryFor(court.id, state.selectedDate, h)){ // chiusura ricorrente del circolo (l'admin può prenotare comunque)
         const [,clo] = closureEntryFor(court.id, state.selectedDate, h);
         slotEl.className = 'slot blocked' + (isPast?' past':'');
         slotEl.innerHTML = `${label}<span class="who">chiuso</span>`;
@@ -3528,18 +3615,22 @@ function renderCourts(host){
       } else {
         slotEl.className = 'slot free';
         if(shiftedHere && state.isAdmin){ slotEl.innerHTML = `${hmFmt(h,true)}<span class="mode-tag">+30′</span>`; slotEl.title = slotRange(court.id, state.selectedDate, h); }
+        else if(state.isAdmin && closureEntryFor(court.id, state.selectedDate, h)){ slotEl.innerHTML = `${label}<span class="mode-tag">chiuso</span>`; slotEl.title = 'Chiusura ricorrente'+(closureEntryFor(court.id, state.selectedDate, h)[1].label ? ': '+closureEntryFor(court.id, state.selectedDate, h)[1].label : '')+' — da admin puoi prenotare comunque'; }
         else if(state.isAdmin && adminOnlyHour(h)){ slotEl.innerHTML = `${label}<span class="mode-tag">admin</span>`; slotEl.title = 'Ora riservata: la prenotano solo gli admin'; }
         else slotEl.textContent = label;
         slotEl.onclick = () => {
           const target = resolveBookingTarget(meObj);
           if(!target) return;
-          if(state.selectedMode==='lezione'){
+          if(state.selectedMode==='lezione' && state.isTeacher && !state.isAdmin && state.teacherLessonMode==='give'){
+            openTeacherLessonForPupil(court, h, label);
+          } else if(state.selectedMode==='lezione'){
             openTeacherPickerAndBook(court, h, label, target);
           } else {
             const adminOnly = isAdminOnlyMode(state.selectedMode);
             const noteTxt = adminOnly && target.memberName.indexOf(' · ')>=0 ? ' — '+target.memberName.split(' · ').slice(1).join(' · ') : '';
             const confirmMsg = 'Confermi la prenotazione delle '+label+' su '+court.name+' ('+modeLabel(state.selectedMode)+(adminOnly ? noteTxt : (target.uid!==state.uid?' per '+target.memberName:''))+')?'+(adminOnly ? '' : '\n\nRicorda: non sarà annullabile nelle 24 ore precedenti l\'orario.')+(shiftedHere ? '\n\nNota: quest\'ora è stata spostata dal circolo e andrà dalle '+hmFmt(h,true)+' alle '+hmFmt(h+1,true)+'.' : '');
-            if(confirm(confirmMsg)) bookSlot(court, h, target);
+            const cloHere = state.isAdmin ? closureEntryFor(court.id, state.selectedDate, h) : null;
+            if(confirm((cloHere ? "Questa ora è in una chiusura ricorrente del circolo"+(cloHere[1].label ? ' ('+cloHere[1].label+')' : '')+". La prenoti comunque da admin.\n\n" : '')+confirmMsg)) bookSlot(court, h, target);
           }
         };
       }
@@ -3894,8 +3985,52 @@ function openTeacherPickerAndBook(court, hour, label, target){
   };
 }
 
+/* Il maestro (non admin) prenota una lezione per un suo allievo: socio o ospite. La lezione finisce subito nel suo riepilogo. */
+function openTeacherLessonForPupil(court, hour, label){
+  const members = Object.entries(state.members||{}).filter(([id,m])=>m && m.name && id!==state.me).sort((a,b)=>a[1].name.localeCompare(b[1].name,'it'));
+  const busy = getBusyTeacherUidsAt(state.selectedDate, hour);
+  if(busy.has(state.uid)){ toast('A quest\'ora sei già impegnato (altra lezione o corso).'); return; }
+  document.querySelectorAll('.modal-overlay').forEach(el=>el.remove());
+  const overlay = document.createElement('div'); overlay.className = 'modal-overlay';
+  overlay.innerHTML = `<div class="modal">
+    <h4>Lezione — ${label} · ${esc(court.name)}</h4>
+    <div class="hint" style="margin-bottom:8px;">Maestro: <b style="color:var(--chalk);">${esc(((state.members[state.me]||{}).name)||'tu')}</b>. L'ora comparirà nel tuo riepilogo con il nome dell'allievo.</div>
+    <div class="field"><label>Allievo (obbligatorio)</label>
+      <select id="pupSel"><option value="">— scegli il socio —</option>${members.map(([id,m])=>`<option value="${esc(id)}">${esc(m.name)}</option>`).join('')}<option value="__guest__">＋ Ospite / non iscritto…</option></select></div>
+    <div class="field" id="pupGuestWrap" style="display:none;"><label>Nome e cognome dell'ospite</label><input type="text" id="pupGuest" maxlength="60" placeholder="Nome e cognome"></div>
+    <div class="btn-row"><button class="btn-ghost" id="pupCancel">Annulla</button><button class="btn-primary" id="pupOk">Conferma prenotazione</button></div>
+  </div>`;
+  document.body.appendChild(overlay);
+  const sel = overlay.querySelector('#pupSel');
+  sel.onchange = () => { overlay.querySelector('#pupGuestWrap').style.display = sel.value==='__guest__' ? 'flex' : 'none'; };
+  overlay.querySelector('#pupCancel').onclick = () => overlay.remove();
+  overlay.querySelector('#pupOk').onclick = () => {
+    let t;
+    if(sel.value==='__guest__'){
+      const name = overlay.querySelector('#pupGuest').value.trim().slice(0,60);
+      if(!name){ toast('Inserisci il nome dell\'ospite'); return; }
+      t = { memberId:null, memberName:name, uid:null };
+    } else {
+      const m = state.members[sel.value];
+      if(!sel.value || !m){ toast('Scegli l\'allievo'); return; }
+      t = { memberId: sel.value, memberName: m.name, uid: m.uid||null };
+    }
+    t.byTeacher = true;
+    state.selectedTeacherUid = state.uid; state.selectedTeacherXid = '';
+    overlay.remove();
+    bookSlot(court, hour, t);
+  };
+}
+
 function resolveBookingTarget(meObj){
   if(state.isAdmin && isAdminOnlyMode(state.selectedMode)){ // SAT / corsi: ora della scuola, non di un socio
+    if(state.selectedMode==='torneo'){
+      const desc = (state.tourneyDesc||'').trim().slice(0,60);
+      const rt = parseFloat(String(state.tourneyRate).replace(',','.'));
+      if(!desc){ toast('Inserisci la descrizione del torneo'); return null; }
+      if(isNaN(rt) || rt < 0){ toast('Inserisci la tariffa oraria del torneo'); return null; }
+      return { memberId:null, memberName:'Torneo · '+desc, uid:null, rate: rt };
+    }
     const base = state.selectedMode==='sat' ? 'SAT' : 'Corsi';
     const note = (state.satNote||'').trim().slice(0,60);
     return { memberId:null, memberName: base+(note ? ' · '+note : ''), uid:null };
@@ -3917,7 +4052,7 @@ function resolveBookingTarget(meObj){
 /* Tariffa di un'ora: per SAT e Corsi (modalità solo admin) vale SEMPRE la tariffa attuale, così azzerarla azzera subito anche le ore già inserite;
    per le altre modalità resta il prezzo salvato al momento della prenotazione */
 function bookingRate(mode, stored){
-  if(isAdminOnlyMode(mode)) return Number(((state.club||{}).rates||{})[mode]) || 0;
+  if(isGlobalRateMode(mode)) return Number(((state.club||{}).rates||{})[mode]) || 0;
   return (typeof stored === 'number') ? stored : (Number(((state.club||{}).rates||{})[mode]) || 0);
 }
 /* Quote fisse mensili di SAT e Corsi: info.fixedFees = { sat, corsi, from:'YYYY-MM' }. Maturano il 1° di ogni mese dal mese indicato. */
@@ -3932,6 +4067,7 @@ function fixedFeeMonths(periodStart, periodEnd){
   return n;
 }
 function modeRateTxt(id){
+  if(id==='torneo') return 'tariffa a inserimento';
   const r = Number(((state.club||{}).rates||{})[id]) || 0;
   return (r === 0 && fixedFeesConfig()[id] > 0) ? 'quota fissa mensile' : '€ '+r+'/h';
 }
@@ -3968,7 +4104,7 @@ function openRecurringEditor(rid, r){
     <div class="field"><label>Ora</label><select id="reHour">${Array.from({length:CLOSE_HOUR-OPEN_HOUR},(_,i)=>{const h=OPEN_HOUR+i;return opt(String(h),String(h).padStart(2,'0')+':00',h===r.hour);}).join('')}</select></div>
     <div class="field"><label>Ore consecutive</label><select id="reHours">${[1,2,3,4,5,6].map(n=>opt(String(n),n===1?'1 ora':n+' ore',n===recHours(r))).join('')}</select></div>
     <label style="display:flex;align-items:center;gap:8px;margin:2px 0 10px;font-size:14px;"><input type="checkbox" id="reHalf" ${r.half===true?'checked':''}> Parte alla mezz'ora (es. 19:30–20:30), ogni settimana</label>
-    <div class="field"><label>Modalità</label><select id="reMode">${ALL_MODES.map(m=>opt(m.id,m.label,m.id===r.mode)).join('')}</select></div>
+    <div class="field"><label>Modalità</label><select id="reMode">${RATE_MODES().map(m=>opt(m.id,m.label,m.id===r.mode)).join('')}</select></div>
     <div class="field" id="reTeacherWrap"><label>Maestro (lezione)</label><select id="reTeacher">${teacherOpts}</select></div>
     <div class="field" id="reRateWrap"><label>Quota pagata (€ per ora)</label><input id="reRate" type="number" min="0" step="0.5" inputmode="decimal" value="${rateInit}"></div>
     <div class="hint" id="reRateNote" style="display:none;margin-bottom:8px;">SAT e Corsi usano sempre la tariffa attuale (o la quota fissa mensile): qui non si imposta.</div>
@@ -3983,7 +4119,7 @@ function openRecurringEditor(rid, r){
     q('reNameWrap').style.display = q('reTarget').value==='__guest__' ? 'flex' : 'none';
     const m = q('reMode').value;
     q('reTeacherWrap').style.display = m==='lezione' ? 'flex' : 'none';
-    const ao = isAdminOnlyMode(m);
+    const ao = isGlobalRateMode(m);
     q('reRateWrap').style.display = ao ? 'none' : 'flex'; q('reRateNote').style.display = ao ? 'block' : 'none';
   };
   let lastMode = r.mode;
@@ -4026,7 +4162,7 @@ function openRecurringEditor(rid, r){
       else { teacherXid = tv.slice(2); teacherName = (state.extraTeachers[teacherXid]||{}).name || r.teacherName || ''; }
     }
     let rate = parseFloat(q('reRate').value);
-    if(isAdminOnlyMode(mode)) rate = Number((state.club.rates||{})[mode])||0;
+    if(isGlobalRateMode(mode)) rate = Number((state.club.rates||{})[mode])||0;
     else if(isNaN(rate) || rate < 0){ fail('Quota non valida'); return; }
     const overlap = Object.entries(state.recurringBookings||{}).find(([oid,o])=> oid!==rid && o.courtId===courtId && o.weekday===weekday
       && hour < o.hour+recHours(o) && o.hour < hour+hours && (!o.endDate || o.endDate >= startDate) && (!endDate || o.startDate <= endDate));
@@ -4228,21 +4364,21 @@ function renderCorsiScreen(host){
     let statsHtml = '';
     if(state.courseAttendanceByCourse[cid] !== undefined && myEid2){
       const myE = state.myEnrollmentData[cid];
-      const presences = Math.max(0, lessonsHeld(c, myE) - countAbsences(c, state.courseAttendanceByCourse[cid], myEid2, myE));
+      const presences = isPP(myE) ? ppPresences(cid, myEid2) : Math.max(0, lessonsHeld(c, myE) - countAbsences(c, state.courseAttendanceByCourse[cid], myEid2, myE));
       const bl = enrolleeBacklog(cid, myEid2);
-      statsHtml = `<div class="list-row"><span>Presenze</span><span class="pill">${presences}</span></div>
+      statsHtml = isPP(myE) ? `<div class="list-row"><span>Presenze (ogni ${PP_PACK} = 1 mensile)</span><span class="pill">${presences}</span></div>` : `<div class="list-row"><span>Presenze</span><span class="pill">${presences}</span></div>
         <div class="list-row" style="flex-wrap:wrap;gap:4px 8px;"><span>Assenze</span><span class="pill" style="${bl.owed>0?'color:var(--danger);border-color:var(--danger);':''}">${bl.absences} · recuperate ${bl.recovered} · da recuperare ${bl.owed}</span></div>
         ${bl.rain>0 ? `<div class="list-row" style="flex-wrap:wrap;gap:4px 8px;"><span>Di cui per pioggia</span><span class="pill rain">${bl.rain} · da recuperare ${bl.rainOwed}</span></div>` : ''}
         <button class="btn-ghost" data-act="absHist" data-cid="${esc(cid)}" data-eid="${esc(myEid2)}" style="width:100%;margin:6px 0;">Vedi assenze e recuperi</button>`;
     }
     const billing = (state.myEnrollmentData[cid]||{}).billing;
-    const sum = courseDueSummary(c, payMap, billing, state.myEnrollmentData[cid]);
+    const sum = courseDueSummary(c, payMap, billing, state.myEnrollmentData[cid], cid, eid);
     totalDue += sum.dueAmount;
-    const rowsHtml = sum.blocks.length ? sum.blocks.map(blk=>{
+    const rowsHtml = sum.pp ? `<div class="list-row"><span>Pacchetti da ${PP_PACK} presenze</span><span class="pill">maturati ${sum.pp.earned} · pagati ${sum.pp.paidPacks}</span></div>${sum.due>0 ? acctRow('Da pagare: '+sum.due+(sum.due===1?' pacchetto':' pacchetti'), 'due') : ''}` : sum.blocks.length ? sum.blocks.map(blk=>{
       const st = blockStatus(payMap, blk);
       return st==='mixed' ? blk.map(m=>acctRow(fmtMonth(m), payStatus(payMap,m))).join('') : acctRow(fmtBlock(blk), st);
     }).join('') : '<div class="hint">Nessun pagamento ancora dovuto.</div>';
-    return { name:c.name, fee:sum.fee, billing, rowsHtml, statsHtml };
+    return { name:c.name, fee:sum.fee, billing, rowsHtml, statsHtml, pp: !!sum.pp };
   }).filter(Boolean);
 
   const acctCard = document.createElement('div');
@@ -4252,7 +4388,7 @@ function renderCorsiScreen(host){
     <div class="list-row"><span>Ore prenotate (da oggi in poi)</span><span class="pill">${upcomingHours}h</span></div>
     ${courseRows.map(cr=>`
       <div style="margin-top:10px;">
-        <div class="hint" style="margin-bottom:4px;"><b style="color:var(--chalk);">${esc(cr.name)}</b> · € ${cr.fee}/mese · ${cr.billing==='monthly'?'pagamento mensile':'pagamento bimestrale (€ '+fmtEuro((Number(cr.fee)||0)*2)+' ogni 2 mesi)'}</div>
+        <div class="hint" style="margin-bottom:4px;"><b style="color:var(--chalk);">${esc(cr.name)}</b> · € ${cr.fee}${cr.pp?' ogni '+PP_PACK+' presenze · tariffa a presenze':'/mese · '+(cr.billing==='monthly'?'pagamento mensile':'pagamento bimestrale (€ '+fmtEuro((Number(cr.fee)||0)*2)+' ogni 2 mesi)')}</div>
         ${cr.statsHtml||''}
         ${cr.rowsHtml}
       </div>
@@ -4283,6 +4419,9 @@ function renderCorsiScreen(host){
     if(nl) loadMyAttendance(cid, nl.date, myEid);
     const myStatus = nl ? attGet(state.myAttendance[cid+'|'+nl.date], nl.hour) : undefined;
     const canDeclare = !!nl && nowDate() < attendanceCutoff(nl.date, nl.hour);
+    const ppMe2 = isPP(state.myEnrollmentData[cid]);
+    const myAbsent = ppMe2 ? myStatus!==true : myStatus===false;
+    const absTxt = ppMe2 ? 'Non hai ancora confermato che ci sarai (tariffa a presenze).' : 'Hai segnalato che non ci sarai.';
     const row1 = [], row2 = [];
     if(state.isAdmin || isMyCourse){ loadTeacherData(cid); row2.push(`<button class="btn-ghost" data-act="teachers" data-cid="${cid}">Maestri</button>`); }
     if(state.isAdmin) row1.push(`<button class="btn-ghost" data-act="enroll" data-cid="${cid}">Iscritti</button>`);
@@ -4306,12 +4445,12 @@ function renderCorsiScreen(host){
         <div class="hint" style="margin-bottom:8px;">Prossima lezione: <b style="color:var(--chalk);">${WEEKDAY_FULL[new Date(nl.date+'T00:00:00').getDay()]} ${fmtDateDisplay(nl.date)} · ${String(nl.hour).padStart(2,'0')}:00</b></div>
         ${canDeclare ? `
           <div class="btn-row">
-            ${myStatus===false
+            ${myAbsent
               ? `<button class="btn-ok" data-act="myatt" data-v="1" data-cid="${cid}">Ci sarò</button>`
               : `<button class="btn-ok" data-act="myatt" data-v="0" data-cid="${cid}">Non ci sarò</button>`}
           </div>
-          <div class="hint" style="margin-top:6px;">${myStatus===false?'Hai segnalato che non ci sarai.':'Sei segnato come presente.'} Puoi cambiare fino alle ${String(getAttendanceCutoffHour()).padStart(2,'0')}:00 del giorno della lezione.</div>`
-        : `<div class="hint">${myStatus===false?'Hai segnalato che non ci sarai.':'✓ Sei segnato come presente.'} Le risposte sono chiuse: per cambiare rivolgiti al maestro.</div>`}
+          <div class="hint" style="margin-top:6px;">${myAbsent?absTxt:'Sei segnato come presente.'} Puoi cambiare fino alle ${String(getAttendanceCutoffHour()).padStart(2,'0')}:00 del giorno della lezione.</div>`
+        : `<div class="hint">${myAbsent?absTxt:'✓ Sei segnato come presente.'} Le risposte sono chiuse: per cambiare rivolgiti al maestro.</div>`}
       </div>` : ''}
       ${actionsHtml}
       <div class="course-detail" id="detail-${cid}"></div>
@@ -4469,7 +4608,7 @@ function renderCorsiScreen(host){
       if(!filtered.length){ enrollListHost.innerHTML = `<div class="hint">Nessun corsista trovato.</div>`; return; }
       filtered.forEach(([eid,e])=>{
         const payMap = paymentsForCourse[eid] || {};
-        const r = { key:cid+'|'+eid, cid, eid, c:course, e, payMap, s:courseDueSummary(course, payMap, e.billing, e), name:e.name||'—' };
+        const r = { key:cid+'|'+eid, cid, eid, c:course, e, payMap, s:courseDueSummary(course, payMap, e.billing, e, cid, eid), name:e.name||'—' };
         const pill = payPill(r.s);
         const row = document.createElement('div'); row.className = 'pay-row';
         row.innerHTML = `<div class="pay-head"><div style="min-width:0;"><div class="pay-name">${esc(e.name)}${e.uid?' <span class="pill" style="padding:2px 7px;">collegato</span>':''}</div><div class="hint">${e.phone?esc(e.phone)+' · ':''}${e.billing==='monthly'?'pagamento mensile':'pagamento bimestrale'}</div></div><span class="pill" style="${pill.style}">${pill.label}</span></div>`;
@@ -4863,7 +5002,7 @@ function renderMaestroScreen(host){
   if(!total){ itemsHost.innerHTML = `<div class="mt-empty">Niente in programma</div>`; return; }
 
   const items = [
-    ...d.lessons.map(([bid,l])=>({ type:'lesson', hour:l.hour, l })),
+    ...d.lessons.map(([bid,l])=>({ type:'lesson', hour:l.hour, l, bid })),
     ...d.sessions.map(s=>({ type:'session', hour:s.hour, s }))
   ].sort((x,y)=> x.hour-y.hour || (x.type==='lesson'?-1:1));
   const pad = h => String(h).padStart(2,'0')+':00';
@@ -4885,8 +5024,16 @@ function renderMaestroScreen(host){
       card.className = 'mt-item cell static lesson-private';
       card.title = 'Lezione privata · '+(l.courtName||'')+' · '+(l.clientName||'');
       card.innerHTML = `<div class="mt-head">
-        <div class="mt-meta"><div class="mt-name">${esc(l.clientName||'—')}</div><div class="mt-sub">Lezione privata</div></div>
+        <div class="mt-meta"><div class="mt-name">${esc(l.clientName||'—')}</div><div class="mt-sub">Lezione privata${l.byTeacher?' · prenotata da te':''}</div></div>
         </div>`;
+      if(l.byTeacher){
+        const cb = document.createElement('button'); cb.className = 'small-btn'; cb.textContent = 'Annulla'; cb.style.margin = '6px 0 0';
+        cb.onclick = async () => {
+          if(!confirm('Annullare la lezione con '+(l.clientName||'l\'allievo')+' ('+String(l.hour).padStart(2,'0')+':00)?')) return;
+          await cancelBooking(it.bid, l.pupilUid||null, state.uid, null);
+        };
+        card.appendChild(cb);
+      }
       return { card, detail:null };
     }
     const s = it.s;
@@ -4897,8 +5044,8 @@ function renderMaestroScreen(host){
 
     const enr = Object.entries(state.courseEnrollments[s.cid]||{}).filter(([_,e])=>enrolleeAttendsSession(e, dow, s.hour, s.courtId));
     const dayAtt = (state.courseAttendanceByCourse[s.cid]||{})[s.dateStr] || {};
-    const names = (test)=>enr.filter(([eid])=>test(attGet(dayAtt[eid], s.hour))).map(([_,e])=>esc(e.name||'—')).join(', ');
-    const abs = enr.filter(([eid])=>attGet(dayAtt[eid], s.hour)===false).length;
+    const names = (wantPres)=>enr.filter(([eid,e])=>attPresent(dayAtt[eid], s.hour, e)===wantPres).map(([_,e])=>esc(e.name||'—')).join(', ');
+    const abs = enr.filter(([eid,e])=>!attPresent(dayAtt[eid], s.hour, e)).length;
     const pres = enr.length - abs; // chi non ha segnato l'assenza è presente di default
     const guests = lessonRecoveries(s.cid, s.dateStr, s.hour, s.courtId);
     const rainOn = enr.some(([eid])=>attRain(dayAtt[eid], s.hour));
@@ -4931,8 +5078,8 @@ function renderMaestroScreen(host){
       detail.appendChild(hd);
       const det = document.createElement('div'); det.className = 'mt-detail'; det.style.borderTop = 'none';
       const lines = [];
-      if(pres) lines.push(`<div><span class="pill" style="color:var(--ok-text);border-color:var(--ok-border);">Presenti (${pres})</span>${names(v=>v!==false)}</div>`);
-      if(abs) lines.push(`<div><span class="pill" style="color:var(--danger);border-color:var(--danger);">Assenti (${abs})</span>${names(v=>v===false)}</div>`);
+      if(pres) lines.push(`<div><span class="pill" style="color:var(--ok-text);border-color:var(--ok-border);">Presenti (${pres})</span>${names(true)}</div>`);
+      if(abs) lines.push(`<div><span class="pill" style="color:var(--danger);border-color:var(--danger);">Assenti (${abs})</span>${names(false)}</div>`);
       if(guests.length) lines.push(`<div><span class="pill">Recuperi (${guests.length})</span>${guests.map(g=>esc(g.rec.name||'—')+' ('+(g.rec.status==='present'?'presente':(g.rec.status==='absent'?'assente':'proposto'))+')').join(', ')}</div>`);
       if(lines.length){
         const blk = document.createElement('div'); blk.className = 'cal-att'; blk.innerHTML = lines.join('');
@@ -5034,16 +5181,18 @@ function renderSuperAdminScreen(host){
   if(clearBtn) clearBtn.onclick = () => { state.auditFrom=''; state.auditTo=''; renderApp(); };
 
   const listHost = screen.querySelector('#auditList');
-  const typeLabels = { cancellazione:'Cancellazione', prenotazione:'Prenotazione', modifica_quota:'Modifica quota', mezz_ora:'Spostamento alla mezz\'ora', mezz_ora_ripristino:'Ripristino orario' };
-  const typeColors = { cancellazione:'var(--danger)', modifica_quota:'var(--clay)' };
+  const typeLabels = { cancella_conteggio:'Conteggio cancellazione', cancellazione:'Cancellazione', prenotazione:'Prenotazione', modifica_quota:'Modifica quota', mezz_ora:'Spostamento alla mezz\'ora', mezz_ora_ripristino:'Ripristino orario' };
+  const typeColors = { cancellazione:'var(--danger)', cancella_conteggio:'var(--clay)', modifica_quota:'var(--clay)' };
   filtered.forEach(([id,e])=>{
     const d = new Date(e.timestamp);
     const when = d.toLocaleDateString('it-IT')+' '+d.toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'});
     const row = document.createElement('div'); row.className='list-row';
-    const rateDetail = e.type==='modifica_quota' ? ` · € ${(e.oldRate||0).toFixed(2)} → € ${(e.newRate||0).toFixed(2)}${e.reason?' · motivo: '+e.reason:''}` : '';
+    const motivoTxt = e.motivo==='circolo' ? ' · <b>problema del circolo (non conta come last-minute)</b>' : '';
+    const rateDetail = (e.type==='cancella_conteggio') ? (e.escluso ? ' · esclusa dal conteggio last-minute (problema del circolo)' : ' · di nuovo conteggiata come last-minute')
+      : e.type==='modifica_quota' ? ` · € ${(e.oldRate||0).toFixed(2)} → € ${(e.newRate||0).toFixed(2)}${e.reason?' · motivo: '+e.reason:''}` : '';
     row.innerHTML = `<span>
       <b style="color:${typeColors[e.type]||'var(--ball)'};">${typeLabels[e.type]||e.type}</b> di <b>${e.byName}</b><br>
-      <span class="hint">${when} · per ${e.forMemberName||'—'} · ${e.courtName||''} ${e.date?fmtDateDisplay(e.date):''} ${e.hour!==undefined?String(e.hour).padStart(2,'0')+':00':''} · ${modeLabel(e.mode)}${rateDetail}</span>
+      <span class="hint">${when} · per ${e.forMemberName||'—'} · ${e.courtName||''} ${e.date?fmtDateDisplay(e.date):''} ${e.hour!==undefined?String(e.hour).padStart(2,'0')+':00':''} · ${e.mode?modeLabel(e.mode):''}${rateDetail}${motivoTxt}${typeof e.rate==='number'&&e.mode==='torneo'?' · € '+e.rate.toFixed(2)+'/h':''}</span>
     </span>`;
     listHost.appendChild(row);
   });
@@ -5328,7 +5477,7 @@ function renderAdminScreen(host){
 
   // Statistiche cancellazioni last-minute (stesso giorno)
   const cancelEntries = Object.values(state.cancellationStats||{});
-  const sameDayCancels = cancelEntries.filter(c=>c.sameDay);
+  const sameDayCancels = cancelEntries.filter(c=>c.sameDay && !c.excluded);
   const byMemberCancel = {};
   sameDayCancels.forEach(c=>{
     const name = c.forMemberName || 'Sconosciuto';
@@ -5462,7 +5611,7 @@ function renderAdminScreen(host){
       </div>
       <label style="display:flex;align-items:center;gap:8px;margin:2px 0 10px;font-size:14px;"><input type="checkbox" id="recHalf"> Parte alla mezz'ora (es. 19:30–20:30), ogni settimana</label>
       <div class="field"><label>Modalità</label>
-        <select id="recMode">${ALL_MODES.map(m=>`<option value="${m.id}">${m.label} (${modeRateTxt(m.id)})</option>`).join('')}</select>
+        <select id="recMode">${RATE_MODES().map(m=>`<option value="${m.id}">${m.label} (${modeRateTxt(m.id)})</option>`).join('')}</select>
       </div>
       <div class="field"><label>Data inizio</label><input id="recStart" type="date" value="${todayKey()}"></div>
       <div class="field"><label>Data fine (opzionale)</label><input id="recEnd" type="date"></div>
@@ -5533,9 +5682,29 @@ function renderAdminScreen(host){
       <div id="cancelByMember">${memberCancelStats.length ? '' : '<div class="hint">Nessuna cancellazione stesso giorno registrata.</div>'}</div>
       <div class="hint" style="margin:10px 0 4px;"><b style="color:var(--chalk);">Per ora del giorno</b></div>
       <div id="cancelByHour">${hourCancelStats.length ? '' : '<div class="hint">—</div>'}</div>
+      <div class="hint" style="margin:10px 0 4px;"><b style="color:var(--chalk);">Dettaglio (ultime 30)</b> · "Non conta" per problemi del circolo (manutenzione, ecc.)</div>
+      <div id="cancelDetail"></div>
     </div>
   `;
   host.replaceChildren(screen);
+
+  // Dettaglio cancellazioni stesso giorno: l'admin può escluderle dal conteggio anche a posteriori
+  const cdHost = screen.querySelector('#cancelDetail');
+  Object.entries(state.cancellationStats||{}).filter(([_,c])=>c.sameDay).sort((a,b)=>(b[1].timestamp||0)-(a[1].timestamp||0)).slice(0,30).forEach(([sid,c])=>{
+    const cn = ((state.club.courts||[]).find(x=>x.id===c.courtId)||{}).name || '';
+    const row = document.createElement('div'); row.className = 'list-row'; row.style.flexWrap = 'wrap';
+    if(c.excluded) row.style.opacity = '.6';
+    row.innerHTML = `<span>${fmtDateDisplay(c.date)} · ${String(c.hour).padStart(2,'0')}:00 · ${esc(cn)} · ${esc(c.forMemberName||'')}${c.excluded?' <span class="pill" style="padding:2px 7px;">'+(c.reason==='circolo'?'problema circolo':'non conta')+'</span>':''}</span>`;
+    const b = document.createElement('button'); b.className = 'small-btn'; b.textContent = c.excluded ? 'Conta di nuovo' : 'Non conta';
+    b.onclick = async () => {
+      try{ await update(ref(db, cpath('cancellationStats/'+sid)), { excluded: !c.excluded, reason: c.excluded ? null : 'circolo' });
+        writeAuditLog({ type:'cancella_conteggio', escluso: !c.excluded, forMemberName: c.forMemberName||'', courtId: c.courtId, courtName: cn, date: c.date, hour: c.hour, mode: c.mode||'' });
+        toast(c.excluded ? 'Di nuovo conteggiata' : 'Esclusa dal conteggio'); }
+      catch(e){ toast('Errore: '+e.message); }
+    };
+    row.appendChild(b); cdHost.appendChild(row);
+  });
+  if(!cdHost.children.length) cdHost.innerHTML = '<div class="hint">—</div>';
 
   // Editor fasce raccolta punti
   if(!state.draftLoyaltyBands){
@@ -5689,7 +5858,7 @@ function renderAdminScreen(host){
   });
 
   const ratesHost = screen.querySelector('#ratesHost');
-  ALL_MODES.forEach(m=>{
+  RATE_MODES().forEach(m=>{
     const row = document.createElement('div'); row.className='field'; row.style.marginBottom='8px';
     row.innerHTML = `<label>${m.label}${ADMIN_ONLY_MODES.some(am=>am.id===m.id)?' (solo admin)':''}</label><input type="number" min="0" step="0.5" id="rate_${m.id}" value="${state.club.rates[m.id]}">`;
     ratesHost.appendChild(row);
@@ -5703,7 +5872,7 @@ function renderAdminScreen(host){
       <div class="field" style="margin-bottom:8px;"><label>Si conta dal mese</label><input type="month" id="fix_from" value="${esc(ff.from)}"></div>`); }
   screen.querySelector('#saveRatesBtn').onclick = async () => {
     const newRates = {};
-    ALL_MODES.forEach(m=>{ newRates[m.id] = parseFloat(screen.querySelector('#rate_'+m.id).value) || 0; });
+    RATE_MODES().forEach(m=>{ newRates[m.id] = parseFloat(screen.querySelector('#rate_'+m.id).value) || 0; });
     const fixSat = Math.max(0, parseFloat(screen.querySelector('#fix_sat').value) || 0);
     const fixCorsi = Math.max(0, parseFloat(screen.querySelector('#fix_corsi').value) || 0);
     const fixFrom = screen.querySelector('#fix_from').value || ((fixSat>0 || fixCorsi>0) ? currentYearMonth() : null);
@@ -5727,11 +5896,10 @@ function renderAdminScreen(host){
       };
       row.appendChild(editPrice);
     }
-    const del = document.createElement('button'); del.className='small-btn'; del.textContent='Annulla';
-    del.onclick = async () => {
+    const doCancel = async (circolo) => {
       await cancelBooking(bid, b.uid, b.teacherUid, {
         forMemberName: b.memberName, courtId: b.courtId, courtName: court ? court.name : '',
-        date: b.date, hour: b.hour, mode: b.mode
+        date: b.date, hour: b.hour, mode: b.mode, ...(circolo ? { motivo: 'circolo' } : {})
       });
       if(b.mode==='normale' || b.mode==='doppio'){
         const sameDay = (b.date === todayKey());
@@ -5739,13 +5907,22 @@ function renderAdminScreen(host){
           const statRef = push(ref(db, cpath('cancellationStats')));
           await set(statRef, {
             forMemberName: b.memberName, memberId: b.memberId||null, date: b.date, hour: b.hour,
-            courtId: b.courtId, mode: b.mode, sameDay, timestamp: Date.now()
+            courtId: b.courtId, mode: b.mode, sameDay, timestamp: Date.now(),
+            ...(circolo ? { excluded: true, reason: 'circolo' } : {})
           });
         }catch(e){ console.error('cancellationStats', e); }
       }
       offerWhatsAppFreedSlot(b.date, b.hour, court ? court.name : '');
     };
+    const del = document.createElement('button'); del.className='small-btn'; del.textContent='Annulla';
+    del.onclick = () => doCancel(false);
     row.appendChild(del);
+    if(b.mode==='normale' || b.mode==='doppio'){
+      const delC = document.createElement('button'); delC.className='small-btn'; delC.textContent='Annulla (circolo)';
+      delC.title = 'Problema del circolo: non conta come cancellazione last-minute';
+      delC.onclick = () => doCancel(true);
+      row.appendChild(delC);
+    }
     bkHost.appendChild(row);
   });
   dayRecurring.sort((a,b)=>a[1].hour-b[1].hour).forEach(([rid,r])=>{
@@ -5779,7 +5956,7 @@ function renderAdminScreen(host){
     list.forEach(([rid,r])=>{
       const court = (state.club.courts||[]).find(c=>c.id===r.courtId);
       const row = document.createElement('div'); row.className='list-row';
-      const rateTxt = (r.mode && !isAdminOnlyMode(r.mode) && typeof r.rate==='number') ? ' · € '+r.rate+'/h' : '';
+      const rateTxt = (r.mode && !isGlobalRateMode(r.mode) && typeof r.rate==='number') ? ' · € '+r.rate+'/h' : '';
       row.style.cssText = 'flex-wrap:wrap;gap:4px 8px;';
       const dayTxt = sel==='all' ? WEEKDAY_FULL[r.weekday].slice(0,3)+' ' : '';
       row.innerHTML = `<span>${esc(dayTxt)}${recRangeTxt(r)} · ${esc(court?court.name:'')} · ${esc(r.memberName)} · ${esc(modeLabel(r.mode))}${r.teacherName?' · '+esc(r.teacherName):''}${esc(rateTxt)}${r.endDate?(' · fino al '+esc(fmtDateDisplay(r.endDate))):''}</span>`;
