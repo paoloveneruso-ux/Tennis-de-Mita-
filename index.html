@@ -4179,7 +4179,29 @@ function openRecurringEditor(rid, r){
   };
 }
 
+/* Settimane saltate di una serie ricorrente: recurringBookings/{rid}/skipDates = { 'YYYY-MM-DD': true } */
+function recSkipped(r, dateStr){ return !!(r && r.skipDates && r.skipDates[dateStr]); }
+function recurringSeriesOnDate(r, dateStr){ // la serie cade in quel giorno, anche se la settimana è stata saltata
+  const dow = new Date(dateStr+'T00:00:00').getDay();
+  return r.weekday===dow && dateStr >= r.startDate && !(r.endDate && dateStr > r.endDate);
+}
+function recSkipButton(rid, r, dateStr, skipped){
+  const b = document.createElement('button'); b.className = 'small-btn';
+  b.textContent = skipped ? 'Ripristina' : 'Salta questa settimana';
+  b.title = skipped ? 'Rimette l\'ora fissa in questo giorno' : 'Annulla solo questo giorno: l\'ora torna libera e non viene conteggiata';
+  b.onclick = () => { if(skipped || confirm('Saltare solo il '+fmtDateDisplay(dateStr)+'? Le altre settimane restano invariate.')) setRecurringSkip(rid, r, dateStr, !skipped); };
+  return b;
+}
+async function setRecurringSkip(rid, r, dateStr, skip){
+  try{
+    await update(ref(db, cpath('recurringBookings/'+rid+'/skipDates')), { [dateStr]: skip ? true : null });
+    const court = (state.club.courts||[]).find(c=>c.id===r.courtId);
+    writeAuditLog({ type: skip ? 'ricorrente_saltata' : 'ricorrente_ripristinata', forMemberName: r.memberName||'', courtId:r.courtId, courtName: court?court.name:'', date: dateStr, hour: r.hour, mode: r.mode||'' });
+    toast(skip ? 'Settimana saltata: l\'ora torna libera' : 'Ora fissa ripristinata');
+  }catch(e){ toast('Errore: '+e.message); }
+}
 function recurringCoversSlot(r, courtId, dateStr, hour){
+  if(recSkipped(r, dateStr)) return false;
   if(r.courtId!==courtId || r.weekday===undefined || hour < r.hour || hour >= r.hour + recHours(r)) return false;
   const dow = new Date(dateStr+'T00:00:00').getDay();
   if(r.weekday!==dow) return false;
@@ -4189,6 +4211,7 @@ function recurringCoversSlot(r, courtId, dateStr, hour){
 }
 
 function recurringActiveOnDate(r, dateStr){
+  if(recSkipped(r, dateStr)) return false;
   const dow = new Date(dateStr+'T00:00:00').getDay();
   if(r.weekday!==dow) return false;
   if(dateStr < r.startDate) return false;
@@ -4211,7 +4234,7 @@ function countRecurringOccurrences(r, periodStartDate, periodEndDate){
     if(d>end || guard>7) return 0;
   }
   let count = 0;
-  while(d<=end){ count++; d.setDate(d.getDate()+7); }
+  while(d<=end){ if(!recSkipped(r, dateKey(d))) count++; d.setDate(d.getDate()+7); }
   return count;
 }
 
@@ -5181,8 +5204,8 @@ function renderSuperAdminScreen(host){
   if(clearBtn) clearBtn.onclick = () => { state.auditFrom=''; state.auditTo=''; renderApp(); };
 
   const listHost = screen.querySelector('#auditList');
-  const typeLabels = { cancella_conteggio:'Conteggio cancellazione', cancellazione:'Cancellazione', prenotazione:'Prenotazione', modifica_quota:'Modifica quota', mezz_ora:'Spostamento alla mezz\'ora', mezz_ora_ripristino:'Ripristino orario' };
-  const typeColors = { cancellazione:'var(--danger)', cancella_conteggio:'var(--clay)', modifica_quota:'var(--clay)' };
+  const typeLabels = { ricorrente_saltata:'Fissa saltata', ricorrente_ripristinata:'Fissa ripristinata', cancella_conteggio:'Conteggio cancellazione', cancellazione:'Cancellazione', prenotazione:'Prenotazione', modifica_quota:'Modifica quota', mezz_ora:'Spostamento alla mezz\'ora', mezz_ora_ripristino:'Ripristino orario' };
+  const typeColors = { ricorrente_saltata:'var(--danger)', ricorrente_ripristinata:'var(--clay)', cancellazione:'var(--danger)', cancella_conteggio:'var(--clay)', modifica_quota:'var(--clay)' };
   filtered.forEach(([id,e])=>{
     const d = new Date(e.timestamp);
     const when = d.toLocaleDateString('it-IT')+' '+d.toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'});
@@ -5468,11 +5491,11 @@ function renderAdminScreen(host){
     byTeacherToday[b.teacherName].hours += 1;
     byTeacherToday[b.teacherName].revenue += (typeof b.rate==='number'?b.rate:(state.club.rates.lezione||0));
   });
-  const dayRecurring = Object.entries(state.recurringBookings||{}).filter(([_,r])=>recurringActiveOnDate(r, state.selectedDate));
+  const dayRecurring = Object.entries(state.recurringBookings||{}).filter(([_,r])=>recurringSeriesOnDate(r, state.selectedDate));
 
   // Cronologia: prenotazioni di un giorno passato, sola lettura
   const historyBookings = allPrivate.filter(([_,b])=>b.date===state.historyDate).sort((a,b)=>a[1].hour-b[1].hour);
-  const historyRecurring = Object.entries(state.recurringBookings||{}).filter(([_,r])=>recurringActiveOnDate(r, state.historyDate)).sort((a,b)=>a[1].hour-b[1].hour);
+  const historyRecurring = Object.entries(state.recurringBookings||{}).filter(([_,r])=>recurringSeriesOnDate(r, state.historyDate)).sort((a,b)=>a[1].hour-b[1].hour);
   const memberList = Object.entries(state.members||{}).sort((a,b)=>a[1].name.localeCompare(b[1].name));
 
   // Statistiche cancellazioni last-minute (stesso giorno)
@@ -5529,7 +5552,7 @@ function renderAdminScreen(host){
       <div class="section-title">Cronologia prenotazioni</div>
       <div class="hint" style="margin-bottom:8px;">Consulta un giorno passato — sola lettura, nessuna modifica o cancellazione da qui.</div>
       <div class="field"><label>Giorno</label><input id="historyDateInput" type="date" value="${state.historyDate}" max="${todayKey()}"></div>
-      <div class="hint" style="margin:6px 0;">${fmtDateDisplay(state.historyDate)} · ${historyBookings.length + historyRecurring.reduce((a,[_,r])=>a+recHours(r),0)} ore</div>
+      <div class="hint" style="margin:6px 0;">${fmtDateDisplay(state.historyDate)} · ${historyBookings.length + historyRecurring.reduce((a,[_,r])=>a+(recSkipped(r,state.historyDate)?0:recHours(r)),0)} ore</div>
       <div id="historyList">${(historyBookings.length||historyRecurring.length) ? '' : '<div class="hint">Nessuna prenotazione in questo giorno.</div>'}</div>
     </div>
 
@@ -5827,10 +5850,13 @@ function renderAdminScreen(host){
     row.innerHTML = `<span>${String(b.hour).padStart(2,'0')}:00 · ${court?court.name:''} · ${b.memberName} · ${modeLabel(b.mode)}${b.teacherName?' · maestro: '+b.teacherName:''} · € ${rate.toFixed(2)}</span>`;
     historyHost.appendChild(row);
   });
-  historyRecurring.forEach(([_,r])=>{
+  historyRecurring.forEach(([rid,r])=>{
     const court = (state.club.courts||[]).find(c=>c.id===r.courtId);
-    const row = document.createElement('div'); row.className='list-row';
-    row.innerHTML = `<span>${recRangeTxt(r)} · ${court?court.name:''} · ${r.memberName} · ${modeLabel(r.mode)} <span class="pill" style="padding:2px 7px;">fisso</span></span>`;
+    const row = document.createElement('div'); row.className='list-row'; row.style.flexWrap='wrap';
+    const sk = recSkipped(r, state.historyDate);
+    if(sk) row.style.opacity = '.65';
+    row.innerHTML = `<span>${recRangeTxt(r)} · ${court?court.name:''} · ${r.memberName} · ${modeLabel(r.mode)} <span class="pill" style="padding:2px 7px;">${sk?'saltata':'fisso'}</span></span>`;
+    row.appendChild(recSkipButton(rid, r, state.historyDate, sk));
     historyHost.appendChild(row);
   });
 
@@ -5927,8 +5953,11 @@ function renderAdminScreen(host){
   });
   dayRecurring.sort((a,b)=>a[1].hour-b[1].hour).forEach(([rid,r])=>{
     const court = (state.club.courts||[]).find(c=>c.id===r.courtId);
-    const row = document.createElement('div'); row.className='list-row';
-    row.innerHTML = `<span>${recRangeTxt(r)} · ${court?court.name:''} · ${r.memberName} · ${modeLabel(r.mode)} <span class="pill" style="padding:2px 7px;">fisso</span></span>`;
+    const row = document.createElement('div'); row.className='list-row'; row.style.flexWrap='wrap';
+    const sk = recSkipped(r, state.selectedDate);
+    if(sk) row.style.opacity = '.65';
+    row.innerHTML = `<span>${recRangeTxt(r)} · ${court?court.name:''} · ${r.memberName} · ${modeLabel(r.mode)} <span class="pill" style="padding:2px 7px;">${sk?'saltata':'fisso'}</span></span>`;
+    row.appendChild(recSkipButton(rid, r, state.selectedDate, sk));
     bkHost.appendChild(row);
   });
 
