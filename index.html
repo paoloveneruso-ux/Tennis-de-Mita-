@@ -230,6 +230,11 @@
   .link{color:var(--ball-text);background:none;border:none;font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.05em;padding:4px 0;text-decoration:underline;cursor:pointer;}
   .member-row,.list-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--line);gap:10px;}
   .member-row:last-child,.list-row:last-child{border-bottom:none;}
+  .list-row{flex-wrap:wrap;row-gap:8px;}
+  .list-row > span:first-child{flex:1 1 200px;min-width:0;overflow-wrap:anywhere;}
+  .list-row > button, .list-row > .small-btn{flex:none;white-space:nowrap;}
+  .list-row:has(> button){justify-content:flex-start;}
+  .list-row > span:first-child:has(~ button){flex-basis:100%;}
   .member-row .name{font-weight:600;font-size:14.5px;}
   .pill{font-family:var(--font-mono);font-size:12px;background:var(--tile);border:1px solid var(--line);border-radius:20px;padding:4px 10px;color:var(--ball-text);white-space:nowrap;}
   .pill.adminpill{color:var(--clay-text);border-color:var(--clay-dim);}
