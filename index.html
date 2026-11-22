@@ -76,6 +76,9 @@
   .slot.mine{background:var(--lime);border-color:var(--ball-dim);color:var(--navy);font-weight:600;}
   .slot.taken{background:var(--navy);border-color:var(--navy);color:var(--ink-dim);cursor:default;}
   .slot.taken .who,.slot.mine .who{display:block;font-size:9px;margin-top:2px;opacity:.8;}
+  .slot.tournament{background:linear-gradient(135deg,#1F45C9,#142E94);border-color:var(--lime);color:#fff;cursor:pointer;}
+  .slot.tournament .who{display:block;font-size:9px;margin-top:2px;opacity:.95;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .slot.tournament .who.nm{font-weight:600;opacity:1;color:var(--lime);}
   .slot.blocked{background:repeating-linear-gradient(45deg,#A22F36,#A22F36 4px,#8E2530 4px,#8E2530 8px);color:#fff;cursor:default;border-color:#FFCDC8;}
   .slot.past{opacity:.5;cursor:default;}
   .slot{min-width:0;overflow:hidden;}
@@ -421,14 +424,24 @@ function buildWhatsAppReminderUrl(phone, studentName, courseName, monthLabel, fe
   return `https://wa.me/${digits}?text=${encodeURIComponent(msg)}`;
 }
 
+const WA_DEFAULT_TEMPLATE = '{campo} libero {quando} {data} alle ore {ora}';
+const WA_OLD_DEFAULT = 'Si è liberato un campo: {giorno} {data} alle {ora} su {campo}. Chi fosse interessato può prenotarlo sull\'app!';
+function waTemplate(){ const t = (state.club && state.club.whatsappTemplate) || ''; return (!t || t===WA_OLD_DEFAULT) ? WA_DEFAULT_TEMPLATE : t; }
+function waWindowHours(){ const n = Number((state.club||{}).whatsappHours); return n>0 ? n : 48; }
 function offerWhatsAppFreedSlot(dateStr, hour, courtName){
-  const template = (state.club && state.club.whatsappTemplate) || 'Si è liberato un campo: {giorno} {data} alle {ora} su {campo}. Chi fosse interessato può prenotarlo sull\'app!';
+  const hoursUntil = (slotDateTime(dateStr, hour) - new Date())/3600000;
+  if(hoursUntil <= 0 || hoursUntil > waWindowHours()) return; // il messaggio ha senso solo per ore imminenti
+  const template = waTemplate();
   const giorno = WEEKDAY_FULL[new Date(dateStr+'T00:00:00').getDay()];
+  const diffDays = Math.round((new Date(dateStr+'T00:00:00') - new Date(todayKey()+'T00:00:00'))/86400000);
+  const quando = diffDays===0 ? 'oggi' : diffDays===1 ? 'domani' : diffDays===2 ? 'dopodomani' : giorno;
+  const campo = /^campo\b/i.test(courtName||'') ? courtName : 'Campo '+(courtName||'');
   const msg = template
     .replace(/{giorno}/g, giorno)
+    .replace(/{quando}/g, quando)
     .replace(/{data}/g, fmtDateDisplay(dateStr))
     .replace(/{ora}/g, String(hour).padStart(2,'0')+':00')
-    .replace(/{campo}/g, courtName);
+    .replace(/{campo}/g, campo);
   const groupHint = (state.club && state.club.whatsappGroupName) ? ' al gruppo "'+state.club.whatsappGroupName+'"' : '';
   if(confirm('Vuoi inviare un messaggio WhatsApp'+groupHint+' per informare i soci?\n\n"'+msg+'"')){
     window.open('https://wa.me/?text='+encodeURIComponent(msg), '_blank');
@@ -3244,7 +3257,7 @@ async function bookSlot(court, hour, targetInfo){
       uid: targetInfo.uid||null, teacherUid, teacherName, createdAt: Date.now()
     , ...(teacherXid ? { teacherXid } : {}), ...(targetInfo.byTeacher ? { bookedBy: state.uid } : {}) });
     if(targetInfo.uid) await set(ref(db, cpath('myBookings/'+targetInfo.uid+'/'+bid)), true);
-    await set(ref(db, cpath('bookingsPublic/'+bid)), { courtId:court.id, date:state.selectedDate, hour, mode:state.selectedMode, teacherUid, teacherName, ...(teacherXid ? { teacherXid } : {}) });
+    await set(ref(db, cpath('bookingsPublic/'+bid)), { courtId:court.id, date:state.selectedDate, hour, mode:state.selectedMode, teacherUid, teacherName, ...(teacherXid ? { teacherXid } : {}), ...(state.selectedMode==='torneo' ? { tourneyName: String(targetInfo.memberName||'').replace(/^Torneo · /,'') } : {}) });
     if(teacherUid){
       await set(ref(db, cpath('myTeachingBookings/'+teacherUid+'/'+bid)), {
         date: state.selectedDate, hour, courtId: court.id, courtName: court.name,
@@ -3575,12 +3588,16 @@ function renderCourts(host){
         const [bid, b] = bookingEntry;
         const mine = !!state.myBookingIds[bid];
         const showShift = shiftedHere && (mine || state.isAdmin); // l'orario spostato lo vedono solo l'admin e chi ha prenotato
-        slotEl.className = 'slot ' + ((state.isAdmin && (b.mode==='sat'||b.mode==='torneo')) ? 'blocked' : (mine ? 'mine' : 'taken')) + (isPast?' past':'');
+        slotEl.className = 'slot ' + ((state.isAdmin && (b.mode==='sat'||b.mode==='torneo')) ? 'blocked' : (b.mode==='torneo' ? 'tournament' : (mine ? 'mine' : 'taken'))) + (isPast?' past':'');
         if(state.isAdmin){ // l'admin vede chi ha prenotato (maestro per le lezioni, socio per singolo/doppio), non il tipo di ora
           const aw = adminSlotWho(bid, b);
           const tagTxt = (aw.tag||'')+(showShift ? (aw.tag?' ':'')+'+30′' : '');
           slotEl.innerHTML = `${showShift ? hmFmt(h,true) : label}<span class="who nm">${esc(aw.who)}</span>${tagTxt ? `<span class="mode-tag" style="text-transform:none;">${esc(tagTxt)}</span>` : ''}`;
           slotEl.title = aw.title+(showShift ? ' · '+slotRange(court.id, state.selectedDate, h) : '');
+        } else if(b.mode==='torneo'){ // i tornei sono visibili a tutti, con i dettagli della competizione
+          slotEl.innerHTML = `${label}<span class="who">Torneo</span><span class="who nm">${esc(b.tourneyName||'')}</span>`;
+          slotEl.title = 'Torneo'+(b.tourneyName ? ': '+b.tourneyName : '');
+          slotEl.onclick = () => toast('Torneo'+(b.tourneyName ? ' · '+b.tourneyName : '')+' · '+label+' · '+court.name);
         } else {
           // ogni socio vede solo la modalità delle proprie ore; per quelle degli altri solo "occupato"
           const modeTag = mine ? `<span class="mode-tag">${b.mode||''}${b.mode==='lezione'&&b.teacherName?' · '+b.teacherName:''}${showShift?' · +30′':''}</span>` : '';
@@ -4203,6 +4220,7 @@ async function setRecurringSkip(rid, r, dateStr, skip){
     const court = (state.club.courts||[]).find(c=>c.id===r.courtId);
     writeAuditLog({ type: skip ? 'ricorrente_saltata' : 'ricorrente_ripristinata', forMemberName: r.memberName||'', courtId:r.courtId, courtName: court?court.name:'', date: dateStr, hour: r.hour, mode: r.mode||'' });
     toast(skip ? 'Settimana saltata: l\'ora torna libera' : 'Ora fissa ripristinata');
+    if(skip) for(let k=0;k<recHours(r);k++) offerWhatsAppFreedSlot(dateStr, r.hour+k, court ? court.name : '');
   }catch(e){ toast('Errore: '+e.message); }
 }
 function recurringCoversSlot(r, courtId, dateStr, hour){
@@ -5675,9 +5693,10 @@ function renderAdminScreen(host){
       <div class="hint" style="margin-bottom:8px;">Quando annulli una prenotazione dall'elenco qui sopra, potrai inviare un messaggio pronto al tuo gruppo WhatsApp con i dettagli dell'ora liberata.</div>
       <div class="field"><label>Nome gruppo WhatsApp (promemoria, WhatsApp non permette di sceglierlo dall'app)</label><input id="waGroupName" value="${state.club.whatsappGroupName||''}" placeholder="Es. Soci TC Lello de Mita"></div>
       <div class="field"><label>Messaggio predefinito</label>
-        <textarea id="waTemplate" rows="4" style="width:100%;background:var(--tile);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:10px;font-family:var(--font-body);font-size:14px;">${state.club.whatsappTemplate||"Si è liberato un campo: {giorno} {data} alle {ora} su {campo}. Chi fosse interessato può prenotarlo sull'app!"}</textarea>
+        <textarea id="waTemplate" rows="4" style="width:100%;background:var(--tile);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:10px;font-family:var(--font-body);font-size:14px;">${esc(waTemplate())}</textarea>
       </div>
-      <div class="hint">Segnaposto disponibili: {giorno} {data} {ora} {campo}</div>
+      <div class="hint">Segnaposto disponibili: {campo} {quando} (oggi/domani/dopodomani) {giorno} {data} {ora}</div>
+      <div class="field" style="margin-top:8px;"><label>Proponi il messaggio solo se l'ora liberata è entro (ore)</label><input id="waHours" type="number" inputmode="numeric" min="1" max="168" value="${waWindowHours()}"></div>
       <button class="btn-ghost" id="saveWaBtn" style="width:100%;margin-top:8px;">Salva messaggio</button>
     </div>
 
@@ -5943,7 +5962,7 @@ function renderAdminScreen(host){
           });
         }catch(e){ console.error('cancellationStats', e); }
       }
-      offerWhatsAppFreedSlot(b.date, b.hour, court ? court.name : '');
+      if(!circolo) offerWhatsAppFreedSlot(b.date, b.hour, court ? court.name : '');
     };
     const del = document.createElement('button'); del.className='small-btn'; del.textContent='Annulla';
     del.onclick = () => doCancel(false);
@@ -6228,7 +6247,7 @@ function renderAdminScreen(host){
     const template = screen.querySelector('#waTemplate').value.trim();
     const groupName = screen.querySelector('#waGroupName').value.trim();
     try{
-      await update(ref(db, cpath('info')), { whatsappTemplate: template, whatsappGroupName: groupName });
+      await update(ref(db, cpath('info')), { whatsappTemplate: template, whatsappGroupName: groupName, whatsappHours: Math.max(1, parseInt(screen.querySelector('#waHours').value,10)||48) });
       toast('Impostazioni salvate');
     }catch(e){ toast('Errore: '+e.message); }
   };
