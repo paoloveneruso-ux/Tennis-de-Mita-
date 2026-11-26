@@ -3569,9 +3569,14 @@ function renderCourts(host){
         slotEl.title = 'Il tuo corso: '+(myCourseHit[1].name||'');
       } else if(courseEntry){
         const [,c] = courseEntry;
-        slotEl.className = 'slot blocked';
-        slotEl.innerHTML = `${label}<span class="who">Corso</span>`;
-        slotEl.title = c.name;
+        if(state.isAdmin){ // l'admin vede i corsi in rosso; i soci li vedono come un normale "occupato"
+          slotEl.className = 'slot blocked';
+          slotEl.innerHTML = `${label}<span class="who">Corso</span>`;
+          slotEl.title = c.name;
+        } else {
+          slotEl.className = 'slot taken' + (isPast?' past':'');
+          slotEl.innerHTML = `${label}<span class="who">occupato</span>`;
+        }
       } else if(recurringEntry){
         const [,r] = recurringEntry;
         const mineFixed = r.uid === state.uid;
