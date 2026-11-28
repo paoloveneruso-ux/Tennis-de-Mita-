@@ -3479,7 +3479,7 @@ function renderCourts(host){
       ${state.selectedMode==='lezione' && state.isTeacher && !state.isAdmin ? `<div class="mode-choice" id="teacherLessonChoice" style="margin-top:8px;">
         <button data-tl="give" class="${state.teacherLessonMode==='give'?'sel':''}">Lezione che do io<br><span style="opacity:.7;">scegli l'allievo</span></button>
         <button data-tl="take" class="${state.teacherLessonMode==='take'?'sel':''}">Lezione per me<br><span style="opacity:.7;">con un altro maestro</span></button></div>` : ''}
-      ${state.selectedMode==='lezione' && !(state.isTeacher && !state.isAdmin && state.teacherLessonMode==='give') ? `<div class="hint" style="margin-top:8px;">${state.isAdmin ? 'Toccando l\'ora libera scegli il maestro (anche non registrato, o aggiungine uno nuovo) e inserisci il nome di chi fa la lezione, obbligatorio.' : "Il maestro si sceglie al momento di toccare l'ora libera: vedrai solo quelli disponibili in quello slot."}</div>` : ''}
+      ${state.selectedMode==='lezione' && !(state.isTeacher && !state.isAdmin && state.teacherLessonMode==='give') ? `<div class="hint" style="margin-top:8px;">${state.isAdmin ? 'Toccando l\'ora libera scegli il maestro (anche non registrato, o aggiungine uno nuovo) e inserisci il nome di chi fa la lezione, obbligatorio.' : "Il maestro o l'istruttore si sceglie al momento di toccare l'ora libera: vedrai solo quelli disponibili in quello slot."}</div>` : ''}
     </div>
     <div class="day-strip" id="dayStrip"></div>
     <div id="courtsHost"></div>
@@ -3956,7 +3956,7 @@ function openTeacherPickerAndBook(court, hour, label, target){
   const pupilInit = (isAdm && !adminSelf && target && target.memberName) ? target.memberName : '';
   const opt = o => '<option value="'+esc(o.v)+'">'+esc(o.l)+'</option>';
   const teacherOpts = (isAdm ? '<option value="">— scegli il maestro —</option>' : '')
-    + (reg.length ? '<optgroup label="Maestri del circolo">'+reg.map(opt).join('')+'</optgroup>' : '')
+    + (reg.length ? '<optgroup label="'+(isAdm ? 'Maestri del circolo' : 'Maestri e istruttori del circolo')+'">'+reg.map(opt).join('')+'</optgroup>' : '')
     + (ext.length ? '<optgroup label="Altri maestri">'+ext.map(opt).join('')+'</optgroup>' : '')
     + (isAdm ? '<option value="__new__">＋ Aggiungi altro maestro…</option>' : '');
 
@@ -3966,12 +3966,12 @@ function openTeacherPickerAndBook(court, hour, label, target){
   overlay.innerHTML = `
     <div class="modal">
       <h4>Lezione — ${label} · ${court.name}</h4>
-      <div class="field"><label>${isAdm ? 'Maestro' : 'Maestro disponibile'}</label>
+      <div class="field"><label>${isAdm ? 'Maestro' : 'Scegli il maestro o l\'istruttore'}</label>
         <select id="pickTeacher">${teacherOpts}</select>
       </div>
       ${isAdm ? `<div class="field"><label>Chi fa la lezione (obbligatorio)</label>
         <input type="text" id="pickPupil" maxlength="60" placeholder="Nome e cognome dell'allievo" value="${esc(pupilInit)}"></div>` : ''}
-      <div class="hint" style="color:var(--clay-text);border:1px solid var(--clay-dim);border-radius:8px;padding:8px;">Ricorda: prima di confermare, contatta privatamente il maestro per assicurarti che sia davvero disponibile in questo orario. La prenotazione qui non lo avvisa automaticamente.</div>
+      <div class="hint" style="color:var(--clay-text);border:1px solid var(--clay-dim);border-radius:8px;padding:8px;">${isAdm ? 'Ricorda: prima di confermare, contatta privatamente il maestro per assicurarti che sia davvero disponibile in questo orario. La prenotazione qui non lo avvisa automaticamente.' : 'Ricorda: prima di confermare, contatta privatamente il maestro o l\'istruttore per assicurarti che sia davvero disponibile in questo orario. La prenotazione qui non lo avvisa automaticamente.'}</div>
       ${isAdm ? '' : '<div class="hint">Non sarà annullabile nelle 24 ore precedenti l\'orario.</div>'}
       <div class="btn-row">
         <button class="btn-ghost" id="cancelPick">Annulla</button>
